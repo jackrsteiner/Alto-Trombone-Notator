@@ -106,6 +106,18 @@ LETTER_SEQ = ["G", "A", "B", "C", "D", "E", "F"]  # diatonic steps up from G
 ACC_ALTER = {"flat": -1, "sharp": +1, "natural": 0}
 ACC_MARK = {-1: "b", 0: "", +1: "#"}
 
+# Live-progress hook. The website sets this to a callback so each processing
+# step is reported while it runs; from the CLI it stays None and costs nothing.
+PROGRESS = None
+
+
+def _progress(msg):
+    if PROGRESS is not None:
+        try:
+            PROGRESS(msg)
+        except Exception:
+            pass
+
 
 def key_accidentals(key):
     k = KEYS.get(key.strip().upper().replace("♭", "B").replace("♯", "#"))
@@ -185,6 +197,10 @@ def dewarp_curvature(gray, color, debug=False):
         if not dev:
             break
         total += dev
+    if total:
+        _progress(f"Page flattened - removed {total:.0f}px of staff-line curvature")
+    else:
+        _progress("Page is flat - no curvature correction needed")
     return gray, color, total
 
 
@@ -297,6 +313,7 @@ def _dewarp_pass(gray, color, debug=False):
     # interpolation degrade to a constant shift outside the staves. Built
     # band by band: full-page float32 maps would cost hundreds of MB, which
     # matters when this runs in the browser on a phone.
+    _progress(f"Straightening {len(C)} staff lines (bowed up to {max_dev:.0f}px)")
     refs_p = np.concatenate(([refs[0] - h], refs, [refs[-1] + h])).astype(np.float32)
     Cp = np.vstack((C[0] - h, C, C[-1] + h))
     gray_out = np.empty_like(gray)
@@ -915,8 +932,11 @@ def annotate_page(path, args, key_acc):
     color = cv2.imread(path)
     if color is None:
         sys.exit(f"Could not read image: {path}")
+    _progress(f"Loaded {os.path.basename(path)} ({color.shape[1]}x{color.shape[0]}px)")
     gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
     gray, color, angle = deskew(gray, color)
+    if angle:
+        _progress(f"Deskewed the page ({angle:+.2f} degrees of tilt)")
     if getattr(args, "no_dewarp", False):    # getattr: tolerate an older caller
         warp_dev = 0.0
     else:
@@ -925,9 +945,14 @@ def annotate_page(path, args, key_acc):
     staves, horiz = find_staves(bw)
     if not staves:
         sys.exit(f"No staves found in {path} — try a cleaner/flatter image.")
+    _progress(f"Found {len(staves)} staves")
 
-    rois = [clean_staff_roi(bw, staff, args.ledger_range) for staff in staves]
+    rois = []
+    for si, staff in enumerate(staves):
+        _progress(f"Isolating staff {si + 1}/{len(staves)} (removing staff lines)")
+        rois.append(clean_staff_roi(bw, staff, args.ledger_range))
     if key_acc is None:
+        _progress("Reading the key signature after each clef")
         key_name, agree, nstaves = detect_key_signature(staves, rois)
         k = KEYS[key_name.upper()]
         desc = ("no sharps or flats" if k == 0
@@ -942,6 +967,7 @@ def annotate_page(path, args, key_acc):
 
     total, guessed, blank = 0, 0, 0
     for si, staff in enumerate(staves):
+        _progress(f"Reading notes on staff {si + 1}/{len(staves)}")
         ss = staff["space"]
         font = load_font(max(12, int(1.5 * ss)))
         healed, light, y0 = rois[si]
