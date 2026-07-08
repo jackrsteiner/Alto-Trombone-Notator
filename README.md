@@ -12,6 +12,8 @@ Takes images of standard bass-clef trombone sheet music, detects the notes, and 
 
 The `fourth` method keeps your tenor reading reflexes but transposes the music; any accompaniment or chords must move up a fourth with you.
 
+You can select **several methods in one run** — on the website by ticking more than one card, on the command line by repeating the flag (`-m octave -m fourth`) or passing `-m all`. The images are analyzed once, and each selected method gets its own annotated PDF and pair of MIDI files (all three methods → 3 PDFs + 6 MIDI files).
+
 ## The website
 
 The site is a single static page that runs the Python script inside your browser using Pyodide (Python compiled to WebAssembly). There is no server: your images never leave your device. Processing runs in a background Web Worker, so the page stays responsive and the detection log streams live into a progress panel while pages are read.
@@ -28,9 +30,9 @@ Any other static host (Netlify, Cloudflare Pages, a plain web server) works the 
 
 1. Wait for the runtime to load. The **first visit downloads roughly 60–90 MB** (Python, numpy, OpenCV, Pillow); later visits use the browser cache and start much faster.
 2. Choose one image per page of music, in page order. PNG or JPG.
-3. Pick a method and where the numbers should go. The **key signature is read from the image automatically**; leave the key on *Auto-detect* unless the log's `detected key` line disagrees with the printed signature, in which case pick the major key yourself and run again.
+3. Tick one or more methods and pick where the numbers should go. The **key signature is read from the image automatically**; leave the key on *Auto-detect* unless the log's `detected key` line disagrees with the printed signature, in which case pick the major key yourself and run again.
 4. Press **Annotate**. A few seconds per page is normal (longer on phones). The **Progress log** panel below the button streams every processing step as it happens — `·`-prefixed activity lines (loading, deskewing, flattening curvature, isolating each staff, reading each staff's notes, with their results) interleaved with the engine's readings, so you can see what is being done and what has already finished. The status line under the button always shows the current step. The panel is collapsible (click its header) and scrolls when the output gets long.
-5. Review the log (including the `detected key` line), then download the PDF. Two MIDI files are offered alongside it — **even notes** (every note a quarter) and **guessed rhythm** (durations estimated from the engraving's note spacing) — so you can hear the piece at the sounding pitch of the chosen method.
+5. Review the log (including the `detected key` line), then download the results. Each selected method gets its own group of links: the annotated PDF plus two MIDI files — **even notes** (every note a quarter) and **guessed rhythm** (durations estimated from the engraving's note spacing) — so you can hear the piece at that method's sounding pitch.
 
 The site works on mobile browsers (Safari, Chrome). The first-visit download is the main cost — do it on Wi-Fi. On a phone you can photograph the music directly from the file picker.
 
@@ -49,24 +51,26 @@ The site works on mobile browsers (Safari, Chrome). The first-visit download is 
 ```
 pip install opencv-python numpy Pillow
 python alto_annotate.py score.png -m octave          # key read from the image
+python alto_annotate.py score.png -m octave -m fourth   # two methods, one analysis
+python alto_annotate.py score.png -m all             # all three methods
 python alto_annotate.py page1.jpg page2.jpg -k F -o out.pdf
 python alto_annotate.py scan.png -k Bb --placement above --debug
 ```
 
 | Flag | Meaning |
 |---|---|
-| `-m`, `--method` | `octave` (default), `pitch`, or `fourth` |
+| `-m`, `--method` | `octave` (default), `pitch`, `fourth`, or `all`. Repeat the flag to annotate several ways in one run; each method gets its own PDF and MIDI files |
 | `-k`, `--key` | Major key signature: `C F Bb Eb Ab Db Gb G D A E B F#`, or `auto` (the default) to read it from the printed signature. Pass a key explicitly if auto-detection reads it wrong |
-| `-o`, `--output` | Output PDF path (default: next to the first input image) |
+| `-o`, `--output` | Output PDF path (default: next to the first input image, named `*_alto_<method>.pdf`). With several methods, the path gains a `_<method>` suffix per method |
 | `--placement` | `below` (default) or `above` the notes |
 | `--ledger-range`, `--sensitivity`, `--skip-left` | Same as the website's advanced settings |
 | `--no-accidentals` | Key-signature-only reading |
 | `--no-dewarp` | Skip the automatic page-curvature correction |
 | `--debug` | Also writes a `*_debug.png` overlay showing every detected staff line, notehead and barline — the fastest way to diagnose a bad result |
 
-The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is the fastest way to proof the detection against the printed page.
+The terminal prints each staff's reading, e.g. `E3*  Eb3  F#3*`, which is the fastest way to proof the detection against the printed page.
 
-Alongside the PDF, two MIDI files are always written next to it (names follow `-o` if given): `*_equal.mid` and `*_rhythm.mid` — see *What it does* below.
+Alongside each PDF, two MIDI files are always written next to it (names follow `-o` if given): `*_equal.mid` and `*_rhythm.mid` — see *What it does* below.
 
 ## Reading the output
 
@@ -74,7 +78,7 @@ Alongside the PDF, two MIDI files are always written next to it (names follow `-
 - **The caption at the foot of every page** states the method and the key that page was read in — `key of Eb major (3 flats), auto-detected` or `..., set manually`. Check it against the printed signature first: if it's wrong, every number on the page is suspect — rerun with the key set manually.
 - **`*` after a note name (terminal log only)** — the pitch was determined by a printed accidental (or one earlier in the same measure), not the key signature.
 - **Orange number, `?` after the note name in the log** — something unreadable (often a rest, or a smudged glyph) sits where an accidental would be. The printed position assumes no accidental; check that note against the page by eye.
-- **No number under a detected note, `X:?` in the log** — the note has no slide position in the chosen method's table (out of range, or a misread pitch). Nothing is printed so you can pencil the position in yourself. The per-page summary splits the counts, e.g. `3/57 notes flagged: 2 orange (verify by eye), 1 blank (no position for this method — pencil in)`.
+- **No number under a detected note** — the note has no slide position in the chosen method's table (out of range, or a misread pitch). Nothing is printed so you can pencil the position in yourself. The per-page summary splits the counts, e.g. `3/57 notes flagged: 2 orange (verify by eye), 1 blank (no position for this method — pencil in)`; when several methods are rendered the line is prefixed with its method, e.g. `[fourth]`.
 
 ## What it does
 
@@ -83,7 +87,7 @@ Alongside the PDF, two MIDI files are always written next to it (names follow `-
 - Solid (quarter/eighth), half and whole noteheads, on the staff and on ledger lines.
 - Printed **sharps, flats and naturals**, applied for the rest of their measure like a human reader would; barlines are detected to know where measures end.
 - Multi-page input to a single multi-page PDF.
-- **Two Standard MIDI Files per run**, playing the detected notes at the **sounding pitch** of the chosen method (as written for `pitch`, an octave up for `octave`, a fourth up for `fourth`): one with every note an even quarter, one with durations **guessed from the engraving's note spacing** (quantized eighth through whole notes). Fixed tempo, quarter = 90 BPM — change it in any MIDI player or DAW.
+- **Two Standard MIDI Files per method**, playing the detected notes at the **sounding pitch** of that method (as written for `pitch`, an octave up for `octave`, a fourth up for `fourth`): one with every note an even quarter, one with durations **guessed from the engraving's note spacing** (quantized eighth through whole notes). Fixed tempo, quarter = 90 BPM — change it in any MIDI player or DAW.
 - Deskewing of tilted photos, straightening of bowed staff lines (page curvature in phone photos), and adaptive thresholding for uneven lighting.
 - **Low-resolution images** (small staff spacing, e.g. preview downloads) are automatically upscaled before reading — the log shows an `upscaling Nx` line when this happens. The output PDF keeps the original page size.
 

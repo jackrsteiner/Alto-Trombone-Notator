@@ -18,8 +18,10 @@ EXPECTED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expected")
 
 
 class PageResult:
-    """One annotate_page run: structured events plus the few log lines the
-    script only reports as text (detected key, flagged summary)."""
+    """One CV pass over a fixture page plus an octave-method render:
+    structured events, the shared PageAnalysis (so multi-method tests can
+    re-render without repeating detection), and the few log lines the script
+    only reports as text (detected key, flagged summary)."""
 
     def __init__(self, path):
         progress = []
@@ -30,7 +32,9 @@ class PageResult:
                                    no_accidentals=False, no_dewarp=False, debug=False)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                self.img, self.events = aa.annotate_page(path, args, None)
+                self.analysis = aa.analyze_page(path, args, None)
+                self.img = aa.render_page(self.analysis, "octave")
+                self.events = self.analysis.notes
         finally:
             aa.PROGRESS = None
         self.log = buf.getvalue()
