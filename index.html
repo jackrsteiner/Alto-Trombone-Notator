@@ -101,13 +101,16 @@
   #status { margin: 18px 0 0; font-size: 0.95rem; color: var(--faint); min-height: 1.4em; }
   #status.err { color: var(--fourth); }
 
+  #logbox { display: none; margin: 18px 0 0; }
+  #logbox summary { font-size: 0.85rem; }
   #log {
-    display: none; margin-top: 18px; padding: 14px 16px;
+    margin-top: 8px; padding: 14px 16px;
     background: #14120E; color: #E8E2D4; border-radius: 6px;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap;
-    overflow-x: auto;
+    overflow-x: auto; overflow-y: auto; max-height: 40vh;
   }
+  @media (max-width: 520px) { #log { max-height: 25vh; } }
   #download {
     display: none; margin-top: 20px;
   }
@@ -183,26 +186,50 @@
   <button id="run" disabled>Loading&hellip;</button>
   <p id="status" role="status">Preparing the Python runtime. The first visit downloads about 60&ndash;90&nbsp;MB; later visits use the cache.</p>
 
-  <pre id="log"></pre>
+  <details id="logbox" open>
+    <summary>Progress log</summary>
+    <pre id="log"></pre>
+  </details>
   <div id="download"><a id="dl" download>Download annotated PDF</a></div>
 
-  <p class="note">Everything runs in your browser &mdash; images never leave this device. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number or <b>?</b> means &ldquo;verify this one by eye&rdquo;. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
+  <p class="note">Everything runs in your browser &mdash; images never leave this device &mdash; and the progress log above streams while pages are processed. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number is a best guess &mdash; verify it by eye. A detected note with <b>no number printed</b> has no slide position in the chosen method (it appears as <b>?</b> in the log); the space is left blank so you can pencil it in. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
 </main>
 
-<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
-<script>
-const $ = id => document.getElementById(id);
-const status = (msg, err=false) => { $("status").textContent = msg; $("status").className = err ? "err" : ""; };
-
+<!-- The annotation engine runs in a Web Worker so the page never freezes and
+     the engine's log lines stream in live. This tag is inert; the main script
+     below turns its text into the worker via a Blob URL. -->
+<script type="text/js-worker" id="workersrc">
 let pyodide = null;
+let cfg = null;
 
 const RUNNER = `
 import io, os, json, contextlib, traceback
 from types import SimpleNamespace
 import alto_annotate as aa
 
+# In the worker, completed lines are streamed to the page while the run is
+# still going. Outside the browser (test harnesses) there is no js.pyLog.
+try:
+    import js
+    _emit = getattr(js, "pyLog", None)
+except ImportError:
+    _emit = None
+
+class _Tee(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self._pend = ""
+    def write(self, s):
+        n = super().write(s)
+        if _emit is not None:
+            self._pend += s
+            while "\\n" in self._pend:
+                line, self._pend = self._pend.split("\\n", 1)
+                _emit(line)
+        return n
+
 def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_left, no_accidentals, no_dewarp=False):
-    buf = io.StringIO()
+    buf = _Tee()
     try:
         with contextlib.redirect_stdout(buf):
             args = SimpleNamespace(method=method, key=key, placement=placement,
@@ -210,7 +237,11 @@ def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_
                                    skip_left=float(skip_left), no_accidentals=bool(no_accidentals),
                                    no_dewarp=bool(no_dewarp), debug=False)
             key_acc = None if key == "auto" else aa.key_accidentals(key)
-            pages = [aa.annotate_page(p, args, key_acc) for p in paths]
+            pages = []
+            for i, p in enumerate(paths):
+                print(f"Page {i + 1}/{len(paths)}: {os.path.basename(p)}")
+                pages.append(aa.annotate_page(p, args, key_acc))
+            print("Assembling PDF...")
             pages[0].save("/output.pdf", save_all=True, append_images=pages[1:], resolution=150)
         return json.dumps({"ok": True, "log": buf.getvalue()})
     except SystemExit as e:
@@ -219,21 +250,24 @@ def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_
         return json.dumps({"ok": False, "log": buf.getvalue(), "error": traceback.format_exc()})
 `;
 
+self.pyLog = t => postMessage({ type: "log", text: t });
+
 async function init() {
   try {
-    status("Loading Python runtime (first visit downloads 60\u201390 MB)\u2026");
-    pyodide = await loadPyodide();
-    status("Loading numpy, OpenCV and Pillow\u2026");
+    postMessage({ type: "status", text: "Loading Python runtime (first visit downloads 60\u201390 MB)\u2026" });
+    importScripts(cfg.pyodideURL);
+    pyodide = await loadPyodide({ indexURL: cfg.indexURL });
+    postMessage({ type: "status", text: "Loading numpy, OpenCV and Pillow\u2026" });
     await pyodide.loadPackage(["numpy", "opencv-python", "pillow"]);
 
-    status("Loading the annotator script\u2026");
-    const scriptResp = await fetch("alto_annotate.py");
+    postMessage({ type: "status", text: "Loading the annotator script\u2026" });
+    const scriptResp = await fetch(cfg.scriptURL);
     if (!scriptResp.ok) throw new Error("alto_annotate.py not found next to index.html");
     pyodide.FS.writeFile("/home/pyodide/alto_annotate.py", await scriptResp.text());
 
     // font for the printed numbers; the script falls back to a basic font if this fails
     try {
-      const fontResp = await fetch("https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf");
+      const fontResp = await fetch(cfg.fontURL);
       if (fontResp.ok) {
         const dirs = ["/usr", "/usr/share", "/usr/share/fonts", "/usr/share/fonts/truetype", "/usr/share/fonts/truetype/dejavu"];
         for (const d of dirs) { try { pyodide.FS.mkdir(d); } catch (e) {} }
@@ -243,71 +277,138 @@ async function init() {
     } catch (e) { /* non-fatal */ }
 
     pyodide.runPython(RUNNER);
+    postMessage({ type: "ready" });
+  } catch (e) {
+    postMessage({ type: "error", error: String((e && e.message) || e) });
+  }
+}
+
+function run(msg) {
+  try {
+    try { pyodide.FS.mkdir("/uploads"); } catch (e) {}
+    const paths = [];
+    msg.files.forEach((f, i) => {
+      const safe = f.name.replace(/[^A-Za-z0-9._-]/g, "_");
+      const p = `/uploads/${String(i).padStart(2, "0")}_${safe}`;
+      pyodide.FS.writeFile(p, new Uint8Array(f.buf));
+      paths.push(p);
+    });
+    pyodide.globals.set("job", pyodide.toPy(Object.assign({ paths }, msg.options)));
+    const result = JSON.parse(pyodide.runPython("run_annotate(**job)"));
+    if (result.ok) {
+      const pdf = pyodide.FS.readFile("/output.pdf");
+      postMessage({ type: "done", ok: true, log: result.log, pdf: pdf.buffer }, [pdf.buffer]);
+    } else {
+      postMessage({ type: "done", ok: false, log: result.log, error: result.error });
+    }
+  } catch (e) {
+    postMessage({ type: "done", ok: false, log: "", error: String((e && e.message) || e) });
+  }
+}
+
+onmessage = e => {
+  if (e.data.type === "init") { cfg = e.data; init(); }
+  else if (e.data.type === "run") run(e.data);
+};
+</script>
+
+<script>
+const $ = id => document.getElementById(id);
+const status = (msg, err=false) => { $("status").textContent = msg; $("status").className = err ? "err" : ""; };
+
+const worker = new Worker(URL.createObjectURL(new Blob(
+  [document.getElementById("workersrc").textContent], { type: "text/javascript" })));
+
+// a blob worker has no usable base URL, so every URL it needs arrives absolute
+worker.postMessage({
+  type: "init",
+  pyodideURL: "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js",
+  indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/",
+  scriptURL: new URL("alto_annotate.py", location.href).href,
+  fontURL: "https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf",
+});
+
+let running = false;
+let jobName = "score", jobMethod = "octave";
+
+function appendLog(text) {
+  const pre = $("log");
+  const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 30;
+  pre.textContent += (pre.textContent ? "\n" : "") + text;
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+
+function setLog(text) {
+  $("log").textContent = text;
+  $("logbox").style.display = text ? "block" : "none";
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function finish(m) {
+  running = false;
+  if (m.ok) {
+    setLog(m.log.trim());
+    $("dl").href = URL.createObjectURL(new Blob([m.pdf], { type: "application/pdf" }));
+    $("dl").download = `${jobName}_alto_${jobMethod}.pdf`;
+    $("download").style.display = "block";
+    status("Done. Check the orange numbers, and pencil in any notes left blank.");
+  } else {
+    status("Annotation failed \u2014 details below.", true);
+    setLog(((m.log || "") + "\n" + (m.error || "")).trim());
+  }
+  $("run").disabled = false;
+}
+
+worker.onmessage = e => {
+  const m = e.data;
+  if (m.type === "status") status(m.text);
+  else if (m.type === "ready") {
     $("run").disabled = false;
     $("run").textContent = "Annotate";
     status("Ready. Choose your image(s) and press Annotate.");
-  } catch (e) {
-    status("Could not start: " + e.message, true);
-  }
-}
+  } else if (m.type === "error") status("Could not start: " + m.error, true);
+  else if (m.type === "log") appendLog(m.text);
+  else if (m.type === "done") finish(m);
+};
+worker.onerror = e => {
+  if (running) { finish({ ok: false, log: $("log").textContent, error: e.message || "worker error" }); }
+  else status("Could not start: " + (e.message || "worker error"), true);
+};
 
 async function annotate() {
   const files = $("files").files;
   if (!files.length) { status("Choose at least one image first.", true); return; }
 
+  running = true;
   $("run").disabled = true;
   $("download").style.display = "none";
-  $("log").style.display = "none";
-  status("Annotating\u2026 this can take a few seconds per page.");
-  await new Promise(r => setTimeout(r, 30));   // let the UI paint
+  $("log").textContent = "";
+  $("logbox").style.display = "block";
+  $("logbox").open = true;
+  status("Annotating\u2026 the log below reports progress as each page is read.");
 
-  try {
-    try { pyodide.FS.mkdir("/uploads"); } catch (e) {}
-    const paths = [];
-    for (let i = 0; i < files.length; i++) {
-      const safe = files[i].name.replace(/[^A-Za-z0-9._-]/g, "_");
-      const p = `/uploads/${String(i).padStart(2, "0")}_${safe}`;
-      pyodide.FS.writeFile(p, new Uint8Array(await files[i].arrayBuffer()));
-      paths.push(p);
-    }
+  jobName = files[0].name.replace(/\.[^.]+$/, "");
+  jobMethod = document.querySelector("input[name=method]:checked").value;
 
-    pyodide.globals.set("job", pyodide.toPy({
-      paths,
-      method: document.querySelector("input[name=method]:checked").value,
-      key: $("key").value,
-      placement: $("placement").value,
-      ledger_range: parseFloat($("ledger").value) || 4.5,
-      sensitivity: parseFloat($("sens").value) || 1.0,
-      skip_left: parseFloat($("skip").value) || 8.0,
-      no_accidentals: $("noacc").checked,
-      no_dewarp: $("nodewarp").checked,
-    }));
-    const result = JSON.parse(pyodide.runPython("run_annotate(**job)"));
-
-    if (result.log) { $("log").textContent = result.log.trim(); $("log").style.display = "block"; }
-
-    if (result.ok) {
-      const pdf = pyodide.FS.readFile("/output.pdf");
-      const url = URL.createObjectURL(new Blob([pdf], { type: "application/pdf" }));
-      const base = files[0].name.replace(/\.[^.]+$/, "");
-      $("dl").href = url;
-      $("dl").download = `${base}_alto_${document.querySelector("input[name=method]:checked").value}.pdf`;
-      $("download").style.display = "block";
-      status("Done. Check any orange numbers against the printed page.");
-    } else {
-      status("Annotation failed \u2014 details below.", true);
-      $("log").textContent = (result.log + "\n" + result.error).trim();
-      $("log").style.display = "block";
-    }
-  } catch (e) {
-    status("Unexpected error: " + e.message, true);
-  } finally {
-    $("run").disabled = false;
+  const payload = [], transfer = [];
+  for (const f of files) {
+    const buf = await f.arrayBuffer();
+    payload.push({ name: f.name, buf });
+    transfer.push(buf);
   }
+  worker.postMessage({ type: "run", files: payload, options: {
+    method: jobMethod,
+    key: $("key").value,
+    placement: $("placement").value,
+    ledger_range: parseFloat($("ledger").value) || 4.5,
+    sensitivity: parseFloat($("sens").value) || 1.0,
+    skip_left: parseFloat($("skip").value) || 8.0,
+    no_accidentals: $("noacc").checked,
+    no_dewarp: $("nodewarp").checked,
+  } }, transfer);
 }
 
 $("run").addEventListener("click", annotate);
-init();
 </script>
 </body>
 </html>

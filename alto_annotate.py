@@ -940,7 +940,7 @@ def annotate_page(path, args, key_acc):
     draw = ImageDraw.Draw(img)
     dbg = color.copy() if args.debug else None
 
-    total, unknown = 0, 0
+    total, guessed, blank = 0, 0, 0
     for si, staff in enumerate(staves):
         ss = staff["space"]
         font = load_font(max(12, int(1.5 * ss)))
@@ -986,18 +986,19 @@ def annotate_page(path, args, key_acc):
             elif pos:
                 label, col = pos, UNKNOWN_COLOR   # unreadable glyph nearby: verify by eye
                 name += "?"
-                unknown += 1
+                guessed += 1
             else:
-                label, col = "?", UNKNOWN_COLOR   # outside the position table
-                unknown += 1
-            names.append(f"{name}:{label}")
+                label, col = None, None   # outside the position table: leave the
+                blank += 1                # space blank for the player to pencil in
+            names.append(f"{name}:{label or '?'}")
 
-            if args.placement == "below":
-                ty = max(cy + 1.1 * ss, staff["bottom"] + 1.5 * ss)
-            else:
-                ty = min(cy - 2.4 * ss, staff["top"] - 2.8 * ss)
-            tw = draw.textlength(label, font=font)
-            draw.text((cx - tw / 2, ty), label, fill=col, font=font)
+            if label is not None:
+                if args.placement == "below":
+                    ty = max(cy + 1.1 * ss, staff["bottom"] + 1.5 * ss)
+                else:
+                    ty = min(cy - 2.4 * ss, staff["top"] - 2.8 * ss)
+                tw = draw.textlength(label, font=font)
+                draw.text((cx - tw / 2, ty), label, fill=col, font=font)
             if args.debug:
                 cv2.circle(dbg, (int(cx), int(cy)), int(0.6 * ss), (0, 200, 0), 2)
         print(f"  staff {si + 1}: {len(heads)} notes, {len(bars)} barlines  " + " ".join(names))
@@ -1023,8 +1024,13 @@ def annotate_page(path, args, key_acc):
         print(f"  (deskewed {angle:+.2f} degrees)")
     if warp_dev:
         print(f"  (dewarped {warp_dev:.0f}px of staff-line curvature)")
-    if unknown:
-        print(f"  {unknown}/{total} notes could not be resolved (marked '?').")
+    if guessed or blank:
+        bits = []
+        if guessed:
+            bits.append(f"{guessed} orange (verify by eye)")
+        if blank:
+            bits.append(f"{blank} blank (no position for this method — pencil in)")
+        print(f"  {guessed + blank}/{total} notes flagged: " + ", ".join(bits))
     return out
 
 
