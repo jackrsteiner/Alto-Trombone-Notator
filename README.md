@@ -30,7 +30,7 @@ Any other static host (Netlify, Cloudflare Pages, a plain web server) works the 
 2. Choose one image per page of music, in page order. PNG or JPG.
 3. Pick a method and where the numbers should go. The **key signature is read from the image automatically**; leave the key on *Auto-detect* unless the log's `detected key` line disagrees with the printed signature, in which case pick the major key yourself and run again.
 4. Press **Annotate**. A few seconds per page is normal (longer on phones). The **Progress log** panel below the button streams every processing step as it happens — `·`-prefixed activity lines (loading, deskewing, flattening curvature, isolating each staff, reading each staff's notes, with their results) interleaved with the engine's readings, so you can see what is being done and what has already finished. The status line under the button always shows the current step. The panel is collapsible (click its header) and scrolls when the output gets long.
-5. Review the log (including the `detected key` line), then download the PDF.
+5. Review the log (including the `detected key` line), then download the PDF. Two MIDI files are offered alongside it — **even notes** (every note a quarter) and **guessed rhythm** (durations estimated from the engraving's note spacing) — so you can hear the piece at the sounding pitch of the chosen method.
 
 The site works on mobile browsers (Safari, Chrome). The first-visit download is the main cost — do it on Wi-Fi. On a phone you can photograph the music directly from the file picker.
 
@@ -66,6 +66,8 @@ python alto_annotate.py scan.png -k Bb --placement above --debug
 
 The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is the fastest way to proof the detection against the printed page.
 
+Alongside the PDF, two MIDI files are always written next to it (names follow `-o` if given): `*_equal.mid` and `*_rhythm.mid` — see *What it does* below.
+
 ## Reading the output
 
 - **Green / blue / dark red number** — a confident reading; the colour identifies the method (see table above).
@@ -80,6 +82,7 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 - Solid (quarter/eighth), half and whole noteheads, on the staff and on ledger lines.
 - Printed **sharps, flats and naturals**, applied for the rest of their measure like a human reader would; barlines are detected to know where measures end.
 - Multi-page input to a single multi-page PDF.
+- **Two Standard MIDI Files per run**, playing the detected notes at the **sounding pitch** of the chosen method (as written for `pitch`, an octave up for `octave`, a fourth up for `fourth`): one with every note an even quarter, one with durations **guessed from the engraving's note spacing** (quantized eighth through whole notes). Fixed tempo, quarter = 90 BPM — change it in any MIDI player or DAW.
 - Deskewing of tilted photos, straightening of bowed staff lines (page curvature in phone photos), and adaptive thresholding for uneven lighting.
 
 ## What it doesn't do
@@ -90,7 +93,7 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 - **No mid-piece key changes** — one key per page. If the signature changes mid-page, split the pages or annotate the sections separately with explicit `-k` values. Cancellation naturals in a key change are not understood.
 - **No double sharps/flats, no courtesy accidentals in parentheses.**
 - **Ties across a barline don't carry their accidental** — the alteration resets at the bar, so the second tied note may be annotated a half step off. Ties within a measure are fine.
-- **Rhythm is ignored** — it annotates pitches; it doesn't know a quarter note from an eighth.
+- **Rhythm is not read** — annotation is pitch-only; it doesn't know a quarter note from an eighth. The *guessed rhythm* MIDI estimates durations from horizontal note spacing, not from flags, beams or dots, so treat it as a sketch; rests are not detected and are not reproduced as silence.
 - Lyrics, chord symbols, dynamics and other text are usually ignored correctly, but dense markings can occasionally produce a stray detection.
 - Whole notes sitting directly on a staff line are occasionally missed.
 - Page curvature in photos is straightened automatically before reading, but sharp creases, strong shadows or extreme perspective can still defeat detection — flatter and more evenly lit is always better. If the correction itself misbehaves on a page, turn it off (`--no-dewarp` / the advanced-settings checkbox).
