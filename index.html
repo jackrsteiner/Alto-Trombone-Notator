@@ -225,7 +225,7 @@ async function init() {
     status("Loading the annotator script\u2026");
     const scriptResp = await fetch("alto_annotate.py");
     if (!scriptResp.ok) throw new Error("alto_annotate.py not found next to index.html");
-    pyodide.FS.writeFile("/alto_annotate.py", await scriptResp.text());
+    pyodide.FS.writeFile("/home/pyodide/alto_annotate.py", await scriptResp.text());
 
     // font for the printed numbers; the script falls back to a basic font if this fails
     try {
