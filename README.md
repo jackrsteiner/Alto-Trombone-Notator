@@ -101,12 +101,27 @@ Alongside the PDF, two MIDI files are always written next to it (names follow `-
 
 Always proof the first page of anything against the printed music, especially the orange flags. The `--debug` overlay (CLI) shows exactly what was detected.
 
+## Testing
+
+```
+pip install numpy opencv-python-headless Pillow pytest
+pytest tests -v
+```
+
+The suite runs the annotator over two committed fixture pages (`tests/fixtures/`) and checks the results against the acceptance criteria in `tests/expected/*.json`:
+
+- **`louie_louie_preview.png`** — a clean but very low-resolution preview page. Criteria are **strict** (exact key, exact per-staff pitch sequences, nothing flagged): this pins the automatic-upscaling path and text-phantom rejection.
+- **`misty_photo.jpg`** — a tilted, curved phone photo of a printed page. Criteria are **tolerance-banded** (key, per-staff note counts ±2, plausible pitch range, flag budget) so small library-version drift doesn't produce false failures.
+
+The same suite runs in CI on every push and pull request (`.github/workflows/tests.yml`). When detection behaviour changes on purpose, update the JSON files deliberately and say so in the commit.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `alto_annotate.py` | The annotator. Used by the website and runnable directly from a terminal |
 | `index.html` | The entire website: UI, Pyodide loading, and the glue that runs the script in-browser |
+| `tests/` | Acceptance tests, fixture pages and expected-results data (see *Testing*) |
 | `README.md` | This file |
 
 Only annotate music you have the rights to.
