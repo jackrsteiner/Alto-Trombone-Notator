@@ -121,6 +121,16 @@
     margin: 0 8px 8px 0;
   }
   #download a.mid { background: var(--brass); font-size: 0.9rem; padding: 10px 18px; }
+  .dlgroup { margin: 0 0 10px; }
+  .dlgroup h3 {
+    margin: 0 0 8px; font-size: 0.8rem; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .dlgroup[data-m="octave"] h3 { color: var(--octave); }
+  .dlgroup[data-m="pitch"]  h3 { color: var(--pitch); }
+  .dlgroup[data-m="fourth"] h3 { color: var(--fourth); }
+  #download .dlgroup[data-m="pitch"]  a:not(.mid) { background: var(--pitch); }
+  #download .dlgroup[data-m="fourth"] a:not(.mid) { background: var(--fourth); }
   .note { font-size: 0.85rem; color: var(--faint); margin-top: 30px; border-top: 1px solid var(--rule); padding-top: 14px; }
   .note b.q { color: var(--flag); }
 </style>
@@ -142,13 +152,13 @@
   </fieldset>
 
   <fieldset>
-    <legend>Method &mdash; the number colour in your PDF matches the card</legend>
+    <legend>Methods &mdash; pick one or more; each gets its own PDF and MIDI files, inked in the card's colour</legend>
     <div class="methods">
-      <label data-m="octave"><input type="radio" name="method" value="octave" checked>
+      <label data-m="octave"><input type="checkbox" name="method" value="octave" checked>
         <b>Octave up</b><small>Same key, sounds one octave above written. The usual choice.</small></label>
-      <label data-m="pitch"><input type="radio" name="method" value="pitch">
+      <label data-m="pitch"><input type="checkbox" name="method" value="pitch">
         <b>Written pitch</b><small>Play exactly what is written, standard alto positions.</small></label>
-      <label data-m="fourth"><input type="radio" name="method" value="fourth">
+      <label data-m="fourth"><input type="checkbox" name="method" value="fourth">
         <b>Up a fourth</b><small>Read with tenor positions; sounds a perfect fourth higher.</small></label>
     </div>
   </fieldset>
@@ -192,11 +202,7 @@
     <summary>Progress log</summary>
     <pre id="log"></pre>
   </details>
-  <div id="download">
-    <a id="dl" download>Download annotated PDF</a>
-    <a id="dlmideq" class="mid" download>MIDI &mdash; even notes</a>
-    <a id="dlmidrhy" class="mid" download>MIDI &mdash; guessed rhythm</a>
-  </div>
+  <div id="download"><!-- one .dlgroup per selected method, built by finish() --></div>
 
   <p class="note">Everything runs in your browser &mdash; images never leave this device &mdash; and the progress log above streams while pages are processed. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number is a best guess &mdash; verify it by eye. A detected note with <b>no number printed</b> has no slide position in the chosen method (it appears as <b>?</b> in the log); the space is left blank so you can pencil it in. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
 </main>
@@ -236,32 +242,17 @@ class _Tee(io.StringIO):
                 _emit(line)
         return n
 
-def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_left, no_accidentals, no_dewarp=False):
+def run_annotate(paths, methods, key, placement, ledger_range, sensitivity, skip_left, no_accidentals, no_dewarp=False):
     buf = _Tee()
     try:
         with contextlib.redirect_stdout(buf):
-            args = SimpleNamespace(method=method, key=key, placement=placement,
+            args = SimpleNamespace(key=key, placement=placement,
                                    ledger_range=float(ledger_range), sensitivity=float(sensitivity),
                                    skip_left=float(skip_left), no_accidentals=bool(no_accidentals),
                                    no_dewarp=bool(no_dewarp), debug=False)
             key_acc = None if key == "auto" else aa.key_accidentals(key)
-            pages = []
-            all_events = []
-            for i, p in enumerate(paths):
-                print(f"Page {i + 1}/{len(paths)}: {os.path.basename(p)}")
-                img, events = aa.annotate_page(p, args, key_acc)
-                pages.append(img)
-                for e in events:
-                    e["page"] = i
-                all_events.extend(events)
-            print("Assembling PDF...")
-            pages[0].save("/output.pdf", save_all=True, append_images=pages[1:], resolution=150)
-            print("Writing MIDI files...")
-            equal_bytes, rhythm_bytes = aa.build_midi_files(all_events, method)
-            with open("/output_equal.mid", "wb") as f:
-                f.write(equal_bytes)
-            with open("/output_rhythm.mid", "wb") as f:
-                f.write(rhythm_bytes)
+            aa.run_job(paths, list(methods), args, key_acc,
+                       lambda m: f"/output_{m}.pdf")
         return json.dumps({"ok": True, "log": buf.getvalue()})
     except SystemExit as e:
         return json.dumps({"ok": False, "log": buf.getvalue(), "error": str(e)})
@@ -316,12 +307,15 @@ function run(msg) {
     pyodide.globals.set("job", pyodide.toPy(Object.assign({ paths }, msg.options)));
     const result = JSON.parse(pyodide.runPython("run_annotate(**job)"));
     if (result.ok) {
-      const pdf = pyodide.FS.readFile("/output.pdf");
-      const midEq = pyodide.FS.readFile("/output_equal.mid");
-      const midRhy = pyodide.FS.readFile("/output_rhythm.mid");
-      postMessage({ type: "done", ok: true, log: result.log, pdf: pdf.buffer,
-                    midiEqual: midEq.buffer, midiRhythm: midRhy.buffer },
-                  [pdf.buffer, midEq.buffer, midRhy.buffer]);
+      const results = [], transfer = [];
+      for (const m of msg.options.methods) {
+        const pdf = pyodide.FS.readFile(`/output_${m}.pdf`);
+        const midEq = pyodide.FS.readFile(`/output_${m}_equal.mid`);
+        const midRhy = pyodide.FS.readFile(`/output_${m}_rhythm.mid`);
+        results.push({ method: m, pdf: pdf.buffer, midiEqual: midEq.buffer, midiRhythm: midRhy.buffer });
+        transfer.push(pdf.buffer, midEq.buffer, midRhy.buffer);
+      }
+      postMessage({ type: "done", ok: true, log: result.log, results }, transfer);
     } else {
       postMessage({ type: "done", ok: false, log: result.log, error: result.error });
     }
@@ -353,7 +347,10 @@ worker.postMessage({
 });
 
 let running = false;
-let jobName = "score", jobMethod = "octave";
+let jobName = "score";
+let blobURLs = [];   // object URLs from the previous run, revoked on the next
+
+const METHOD_LABELS = { octave: "Octave up", pitch: "Written pitch", fourth: "Up a fourth" };
 
 function appendLog(text) {
   const pre = $("log");
@@ -368,17 +365,40 @@ function setLog(text) {
   $("log").scrollTop = $("log").scrollHeight;
 }
 
+function makeLink(buf, type, name, text, cls) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([buf], { type }));
+  blobURLs.push(a.href);
+  a.download = name;
+  a.textContent = text;
+  if (cls) a.className = cls;
+  return a;
+}
+
 function finish(m) {
   running = false;
   if (m.ok) {
     setLog(m.log.trim());
-    $("dl").href = URL.createObjectURL(new Blob([m.pdf], { type: "application/pdf" }));
-    $("dl").download = `${jobName}_alto_${jobMethod}.pdf`;
-    $("dlmideq").href = URL.createObjectURL(new Blob([m.midiEqual], { type: "audio/midi" }));
-    $("dlmideq").download = `${jobName}_alto_${jobMethod}_equal.mid`;
-    $("dlmidrhy").href = URL.createObjectURL(new Blob([m.midiRhythm], { type: "audio/midi" }));
-    $("dlmidrhy").download = `${jobName}_alto_${jobMethod}_rhythm.mid`;
-    $("download").style.display = "block";
+    const box = $("download");
+    blobURLs.forEach(u => URL.revokeObjectURL(u));
+    blobURLs = [];
+    box.textContent = "";
+    for (const r of m.results) {
+      const grp = document.createElement("div");
+      grp.className = "dlgroup";
+      grp.dataset.m = r.method;
+      const h = document.createElement("h3");
+      h.textContent = METHOD_LABELS[r.method] || r.method;
+      grp.appendChild(h);
+      grp.appendChild(makeLink(r.pdf, "application/pdf",
+        `${jobName}_alto_${r.method}.pdf`, "Annotated PDF"));
+      grp.appendChild(makeLink(r.midiEqual, "audio/midi",
+        `${jobName}_alto_${r.method}_equal.mid`, "MIDI — even notes", "mid"));
+      grp.appendChild(makeLink(r.midiRhythm, "audio/midi",
+        `${jobName}_alto_${r.method}_rhythm.mid`, "MIDI — guessed rhythm", "mid"));
+      box.appendChild(grp);
+    }
+    box.style.display = "block";
     status("Done. Check the orange numbers, and pencil in any notes left blank.");
   } else {
     status("Annotation failed \u2014 details below.", true);
@@ -410,6 +430,8 @@ worker.onerror = e => {
 async function annotate() {
   const files = $("files").files;
   if (!files.length) { status("Choose at least one image first.", true); return; }
+  const jobMethods = [...document.querySelectorAll("input[name=method]:checked")].map(i => i.value);
+  if (!jobMethods.length) { status("Pick at least one method.", true); return; }
 
   running = true;
   $("run").disabled = true;
@@ -420,7 +442,6 @@ async function annotate() {
   status("Annotating\u2026 the log below reports progress as each page is read.");
 
   jobName = files[0].name.replace(/\.[^.]+$/, "");
-  jobMethod = document.querySelector("input[name=method]:checked").value;
 
   const payload = [], transfer = [];
   for (const f of files) {
@@ -429,7 +450,7 @@ async function annotate() {
     transfer.push(buf);
   }
   worker.postMessage({ type: "run", files: payload, options: {
-    method: jobMethod,
+    methods: jobMethods,
     key: $("key").value,
     placement: $("placement").value,
     ledger_range: parseFloat($("ledger").value) || 4.5,

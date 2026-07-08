@@ -14,10 +14,16 @@ Three annotation methods (matching the three charts):
   fourth             Read as written with tenor positions — sounds a 4th up.
 
 Usage:
-  python alto_annotate.py score.png                          # octave method, C major
-  python alto_annotate.py score.jpg -m octave -k Eb          # specify key
+  python alto_annotate.py score.png                          # octave method, auto key
+  python alto_annotate.py score.jpg -m pitch -k Eb           # specify method and key
+  python alto_annotate.py score.png -m octave -m fourth      # two methods in one run
+  python alto_annotate.py score.png -m all                   # all three methods
   python alto_annotate.py p1.png p2.png -k F -o out.pdf      # multi-page PDF
   python alto_annotate.py scan.png -k Eb --debug             # save detection overlay
+
+Each selected method gets its own annotated PDF plus two MIDI files
+(*_equal.mid, *_rhythm.mid) at that method's sounding pitch; the image is
+only analyzed once however many methods are chosen.
 
 Notes & limitations (lightweight OpenCV approach):
   * Bass clef is assumed. The key signature is read from the image by
@@ -1033,7 +1039,21 @@ def load_font(size):
     return ImageFont.load_default()
 
 
-def annotate_page(path, args, key_acc):
+class PageAnalysis:
+    """Method-independent result of the computer-vision pass over one page:
+    the clean page image (at working resolution), staff geometry, key caption
+    and the detected notes. render_page() turns one of these into an annotated
+    page for a given method without repeating any detection work."""
+
+    def __init__(self, img, scale, staves, key_label, notes):
+        self.img = img          # clean PIL RGB page at working resolution
+        self.scale = scale      # upscale factor; render downsizes by it
+        self.staves = staves    # staff geometry at working resolution
+        self.key_label = key_label
+        self.notes = notes      # per-note dicts, in reading order
+
+
+def analyze_page(path, args, key_acc):
     color = cv2.imread(path)
     if color is None:
         sys.exit(f"Could not read image: {path}")
@@ -1090,17 +1110,13 @@ def annotate_page(path, args, key_acc):
         key_label = describe_key(FLAT_KEYS[-k] if k < 0 else SHARP_KEYS[k],
                                  k, "set manually")
 
-    caption, rgb = METHOD_INFO[args.method]
     img = Image.fromarray(cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img)
     dbg = color.copy() if args.debug else None
 
-    total, guessed, blank = 0, 0, 0
-    events = []          # per-note data for MIDI rendering, in reading order
+    notes = []           # per-note data for rendering and MIDI, in reading order
     for si, staff in enumerate(staves):
         _progress(f"Reading notes on staff {si + 1}/{len(staves)}")
         ss = staff["space"]
-        font = load_font(max(12, int(1.5 * ss)))
         healed, light, y0 = rois[si]
         heads = detect_noteheads(healed, light, y0, staff, args.ledger_range,
                                  args.sensitivity, args.skip_left, lines_mask)
@@ -1135,30 +1151,12 @@ def annotate_page(path, args, key_acc):
             else:
                 alter = key_acc.get(letter, 0)
 
-            total += 1
             name = f"{letter}{ACC_MARK[alter]}{octave}{starred}"
             midi = midi_of(letter, octave, alter)
-            pos = position_for(midi, args.method)
-            events.append({"midi": midi, "cx": float(cx), "staff": si,
-                           "measure": bar_i, "ss": float(ss), "page": 0})
-            if pos and not verify:
-                label, col = pos, rgb
-            elif pos:
-                label, col = pos, UNKNOWN_COLOR   # unreadable glyph nearby: verify by eye
-                name += "?"
-                guessed += 1
-            else:
-                label, col = None, None   # outside the position table: leave the
-                blank += 1                # space blank for the player to pencil in
-            names.append(f"{name}:{label or '?'}")
-
-            if label is not None:
-                if args.placement == "below":
-                    ty = max(cy + 1.1 * ss, staff["bottom"] + 1.5 * ss)
-                else:
-                    ty = min(cy - 2.4 * ss, staff["top"] - 2.8 * ss)
-                tw = draw.textlength(label, font=font)
-                draw.text((cx - tw / 2, ty), label, fill=col, font=font)
+            notes.append({"midi": midi, "cx": float(cx), "cy": float(cy),
+                          "staff": si, "measure": bar_i, "ss": float(ss),
+                          "page": 0, "verify": verify, "name": name})
+            names.append(name + ("?" if verify else ""))
             if args.debug:
                 cv2.circle(dbg, (int(cx), int(cy)), int(0.6 * ss), (0, 200, 0), 2)
         print(f"  staff {si + 1}: {len(heads)} notes, {len(bars)} barlines  " + " ".join(names))
@@ -1169,20 +1167,6 @@ def annotate_page(path, args, key_acc):
                 cv2.line(dbg, (int(bx), int(staff["top"])), (int(bx), int(staff["bottom"])),
                          (255, 0, 200), 2)
 
-    if scale > 1:
-        img = img.resize((img.width // scale, img.height // scale), Image.LANCZOS)
-    ss0 = staves[0]["space"] / scale
-    strip = int(3 * ss0)
-    out = Image.new("RGB", (img.width, img.height + strip), "white")
-    out.paste(img, (0, 0))
-    footer = f"Alto trombone (Eb) — {caption} — {key_label}"
-    fdraw = ImageDraw.Draw(out)
-    fsize = max(12, int(1.3 * ss0))
-    font = load_font(fsize)
-    while fsize > 10 and fdraw.textlength(footer, font=font) > out.width - 2 * ss0:
-        fsize -= 1
-        font = load_font(fsize)
-    fdraw.text((int(ss0), img.height + int(0.7 * ss0)), footer, fill=rgb, font=font)
     if args.debug:
         dpath = os.path.splitext(path)[0] + "_debug.png"
         cv2.imwrite(dpath, dbg)
@@ -1191,14 +1175,126 @@ def annotate_page(path, args, key_acc):
         print(f"  (deskewed {angle:+.2f} degrees)")
     if warp_dev:
         print(f"  (dewarped {warp_dev:.0f}px of staff-line curvature)")
+    return PageAnalysis(img, scale, staves, key_label, notes)
+
+
+def render_page(analysis, method, placement="below", tag=""):
+    """Draw one method's slide positions and footer onto a copy of an analyzed
+    page. Cheap next to the CV pass, so several methods can be rendered from a
+    single analyze_page() run. Does not modify the analysis."""
+    caption, rgb = METHOD_INFO[method]
+    img = analysis.img.copy()
+    draw = ImageDraw.Draw(img)
+    fonts = {}
+    guessed, blank = 0, 0
+    for note in analysis.notes:
+        pos = position_for(note["midi"], method)
+        if pos and not note["verify"]:
+            label, col = pos, rgb
+        elif pos:
+            label, col = pos, UNKNOWN_COLOR   # unreadable glyph nearby: verify by eye
+            guessed += 1
+        else:
+            blank += 1     # outside the position table: leave the space blank
+            continue       # for the player to pencil in
+        staff = analysis.staves[note["staff"]]
+        cx, cy, ss = note["cx"], note["cy"], note["ss"]
+        if placement == "below":
+            ty = max(cy + 1.1 * ss, staff["bottom"] + 1.5 * ss)
+        else:
+            ty = min(cy - 2.4 * ss, staff["top"] - 2.8 * ss)
+        fsize = max(12, int(1.5 * ss))
+        font = fonts.get(fsize) or fonts.setdefault(fsize, load_font(fsize))
+        tw = draw.textlength(label, font=font)
+        draw.text((cx - tw / 2, ty), label, fill=col, font=font)
+
+    scale = analysis.scale
+    if scale > 1:
+        img = img.resize((img.width // scale, img.height // scale), Image.LANCZOS)
+    ss0 = analysis.staves[0]["space"] / scale
+    strip = int(3 * ss0)
+    out = Image.new("RGB", (img.width, img.height + strip), "white")
+    out.paste(img, (0, 0))
+    footer = f"Alto trombone (Eb) — {caption} — {analysis.key_label}"
+    fdraw = ImageDraw.Draw(out)
+    fsize = max(12, int(1.3 * ss0))
+    font = load_font(fsize)
+    while fsize > 10 and fdraw.textlength(footer, font=font) > out.width - 2 * ss0:
+        fsize -= 1
+        font = load_font(fsize)
+    fdraw.text((int(ss0), img.height + int(0.7 * ss0)), footer, fill=rgb, font=font)
     if guessed or blank:
         bits = []
         if guessed:
             bits.append(f"{guessed} orange (verify by eye)")
         if blank:
             bits.append(f"{blank} blank (no position for this method — pencil in)")
-        print(f"  {guessed + blank}/{total} notes flagged: " + ", ".join(bits))
-    return out, events
+        print(f"  {tag}{guessed + blank}/{len(analysis.notes)} notes flagged: "
+              + ", ".join(bits))
+    return out
+
+
+def annotate_page(path, args, key_acc):
+    """Single-method convenience kept for existing callers: one CV pass, one
+    render. Returns (annotated PIL image, note events)."""
+    analysis = analyze_page(path, args, key_acc)
+    return render_page(analysis, args.method, args.placement), analysis.notes
+
+
+def expand_methods(raw):
+    """Normalize a repeatable -m/--method list: None/empty -> the default,
+    'all' -> every method, duplicates removed preserving order."""
+    if not raw:
+        return ["octave"]
+    if "all" in raw:
+        return list(METHOD_INFO)
+    return list(dict.fromkeys(raw))
+
+
+def resolve_outputs(images, methods, output):
+    """Map each method to its PDF path. A single method keeps today's names:
+    the -o path verbatim, or <first image>_alto_<method>.pdf. With several
+    methods an explicit -o path gets a _<method> suffix per method."""
+    if output and len(methods) == 1:
+        return {methods[0]: output}
+    if output:
+        base, ext = os.path.splitext(output)
+        return {m: f"{base}_{m}{ext or '.pdf'}" for m in methods}
+    stem = os.path.splitext(images[0])[0]
+    return {m: f"{stem}_alto_{m}.pdf" for m in methods}
+
+
+def run_job(paths, methods, args, key_acc, pdf_path_for):
+    """Shared CLI/website driver: run the CV pass once per page, then write
+    one PDF and two MIDI files per method. Returns {method: written paths}."""
+    key_desc = "auto-detect" if key_acc is None else f"key of {args.key}"
+    analyses, all_events = [], []
+    for pi, p in enumerate(paths):
+        print(f"Processing {p} [{'+'.join(methods)}, {key_desc}] ...")
+        analysis = analyze_page(p, args, key_acc)
+        for n in analysis.notes:
+            n["page"] = pi
+        analyses.append(analysis)
+        all_events.extend(analysis.notes)
+
+    written = {}
+    for method in methods:
+        tag = f"[{method}] " if len(methods) > 1 else ""
+        _progress(f"Rendering {method} annotations")
+        pages = [render_page(a, method, args.placement, tag) for a in analyses]
+        outpath = pdf_path_for(method)
+        pages[0].save(outpath, save_all=True, append_images=pages[1:], resolution=150)
+        files = [outpath]
+        equal_bytes, rhythm_bytes = build_midi_files(all_events, method)
+        base = os.path.splitext(outpath)[0]
+        for suffix, data in (("_equal.mid", equal_bytes), ("_rhythm.mid", rhythm_bytes)):
+            with open(base + suffix, "wb") as f:
+                f.write(data)
+            files.append(base + suffix)
+        for f in files:
+            print(f"Wrote {f}")
+        written[method] = files
+    return written
 
 
 def main():
@@ -1206,8 +1302,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__[__doc__.index("Three annotation"):])
     ap.add_argument("images", nargs="+", help="sheet music image file(s), in page order")
-    ap.add_argument("-m", "--method", choices=["octave", "pitch", "fourth"],
-                    default="octave", help="annotation method (default: octave)")
+    ap.add_argument("-m", "--method", dest="methods", action="append",
+                    choices=["octave", "pitch", "fourth", "all"], metavar="METHOD",
+                    help="annotation method: octave, pitch, fourth or all "
+                         "(default: octave). Repeat the flag to get a PDF and "
+                         "MIDI files for several methods from one run, e.g. "
+                         "-m octave -m fourth")
     ap.add_argument("-k", "--key", default="auto",
                     help='major key signature, e.g. Eb, F, G, or "auto" to read it '
                          "from the image (default: auto). Pass a key explicitly if "
@@ -1231,6 +1331,7 @@ def main():
                     help="save a *_debug.png overlay showing detected staves, noteheads "
                          "and barlines")
     args = ap.parse_args()
+    methods = expand_methods(args.methods)
 
     if args.key.strip().lower() == "auto":
         key_acc = None
@@ -1239,26 +1340,8 @@ def main():
         if args.key.upper() == "C":
             print("Note: using key of C (no sharps/flats). Use -k auto to read it from the image.")
 
-    pages, all_events = [], []
-    for pi, p in enumerate(args.images):
-        key_desc = "auto-detect" if key_acc is None else f"key of {args.key}"
-        print(f"Processing {p} [{args.method}, {key_desc}] ...")
-        img, events = annotate_page(p, args, key_acc)
-        pages.append(img)
-        for e in events:
-            e["page"] = pi
-        all_events.extend(events)
-
-    outpath = args.output or os.path.splitext(args.images[0])[0] + f"_alto_{args.method}.pdf"
-    pages[0].save(outpath, save_all=True, append_images=pages[1:], resolution=150)
-    print(f"Wrote {outpath}")
-
-    base = os.path.splitext(outpath)[0]
-    equal_bytes, rhythm_bytes = build_midi_files(all_events, args.method)
-    for suffix, data in (("_equal.mid", equal_bytes), ("_rhythm.mid", rhythm_bytes)):
-        with open(base + suffix, "wb") as f:
-            f.write(data)
-        print(f"Wrote {base + suffix}")
+    outputs = resolve_outputs(args.images, methods, args.output)
+    run_job(args.images, methods, args, key_acc, outputs.__getitem__)
 
 
 if __name__ == "__main__":
