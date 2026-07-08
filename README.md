@@ -14,7 +14,7 @@ The `fourth` method keeps your tenor reading reflexes but transposes the music; 
 
 ## The website
 
-The site is a single static page that runs the Python script inside your browser using Pyodide (Python compiled to WebAssembly). There is no server: your images never leave your device.
+The site is a single static page that runs the Python script inside your browser using Pyodide (Python compiled to WebAssembly). There is no server: your images never leave your device. Processing runs in a background Web Worker, so the page stays responsive and the detection log streams live into a progress panel while pages are read.
 
 ### Hosting it on GitHub Pages
 
@@ -29,8 +29,8 @@ Any other static host (Netlify, Cloudflare Pages, a plain web server) works the 
 1. Wait for the runtime to load. The **first visit downloads roughly 60–90 MB** (Python, numpy, OpenCV, Pillow); later visits use the browser cache and start much faster.
 2. Choose one image per page of music, in page order. PNG or JPG.
 3. Pick a method and where the numbers should go. The **key signature is read from the image automatically**; leave the key on *Auto-detect* unless the log's `detected key` line disagrees with the printed signature, in which case pick the major key yourself and run again.
-4. Press **Annotate**. A few seconds per page is normal (longer on phones).
-5. Review the detection log (including the `detected key` line), then download the PDF.
+4. Press **Annotate**. A few seconds per page is normal (longer on phones). The **Progress log** panel below the button streams each staff's reading as it happens — that's how you know it's working, not frozen. The panel is collapsible (click its header) and scrolls when the output gets long.
+5. Review the log (including the `detected key` line), then download the PDF.
 
 The site works on mobile browsers (Safari, Chrome). The first-visit download is the main cost — do it on Wi-Fi. On a phone you can photograph the music directly from the file picker.
 
@@ -70,8 +70,8 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 
 - **Green / blue / dark red number** — a confident reading; the colour identifies the method (see table above).
 - **`*` after a note name (terminal log only)** — the pitch was determined by a printed accidental (or one earlier in the same measure), not the key signature.
-- **Orange number, `?` in the log** — something unreadable (often a rest, or a smudged glyph) sits where an accidental would be. The printed position assumes no accidental; check that note against the page by eye.
-- **Orange `?` instead of a number** — the note is outside the instrument's range table for the chosen method.
+- **Orange number, `?` after the note name in the log** — something unreadable (often a rest, or a smudged glyph) sits where an accidental would be. The printed position assumes no accidental; check that note against the page by eye.
+- **No number under a detected note, `X:?` in the log** — the note has no slide position in the chosen method's table (out of range, or a misread pitch). Nothing is printed so you can pencil the position in yourself. The per-page summary splits the counts, e.g. `3/57 notes flagged: 2 orange (verify by eye), 1 blank (no position for this method — pencil in)`.
 
 ## What it does
 
