@@ -71,6 +71,7 @@ Alongside the PDF, two MIDI files are always written next to it (names follow `-
 ## Reading the output
 
 - **Green / blue / dark red number** — a confident reading; the colour identifies the method (see table above).
+- **The caption at the foot of every page** states the method and the key that page was read in — `key of Eb major (3 flats), auto-detected` or `..., set manually`. Check it against the printed signature first: if it's wrong, every number on the page is suspect — rerun with the key set manually.
 - **`*` after a note name (terminal log only)** — the pitch was determined by a printed accidental (or one earlier in the same measure), not the key signature.
 - **Orange number, `?` after the note name in the log** — something unreadable (often a rest, or a smudged glyph) sits where an accidental would be. The printed position assumes no accidental; check that note against the page by eye.
 - **No number under a detected note, `X:?` in the log** — the note has no slide position in the chosen method's table (out of range, or a misread pitch). Nothing is printed so you can pencil the position in yourself. The per-page summary splits the counts, e.g. `3/57 notes flagged: 2 orange (verify by eye), 1 blank (no position for this method — pencil in)`.
