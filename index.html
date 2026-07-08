@@ -118,7 +118,9 @@
     display: inline-block; font-weight: 600; color: #fff;
     background: var(--octave); text-decoration: none;
     padding: 12px 30px; border-radius: 6px;
+    margin: 0 8px 8px 0;
   }
+  #download a.mid { background: var(--brass); font-size: 0.9rem; padding: 10px 18px; }
   .note { font-size: 0.85rem; color: var(--faint); margin-top: 30px; border-top: 1px solid var(--rule); padding-top: 14px; }
   .note b.q { color: var(--flag); }
 </style>
@@ -190,7 +192,11 @@
     <summary>Progress log</summary>
     <pre id="log"></pre>
   </details>
-  <div id="download"><a id="dl" download>Download annotated PDF</a></div>
+  <div id="download">
+    <a id="dl" download>Download annotated PDF</a>
+    <a id="dlmideq" class="mid" download>MIDI &mdash; even notes</a>
+    <a id="dlmidrhy" class="mid" download>MIDI &mdash; guessed rhythm</a>
+  </div>
 
   <p class="note">Everything runs in your browser &mdash; images never leave this device &mdash; and the progress log above streams while pages are processed. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number is a best guess &mdash; verify it by eye. A detected note with <b>no number printed</b> has no slide position in the chosen method (it appears as <b>?</b> in the log); the space is left blank so you can pencil it in. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
 </main>
@@ -240,11 +246,22 @@ def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_
                                    no_dewarp=bool(no_dewarp), debug=False)
             key_acc = None if key == "auto" else aa.key_accidentals(key)
             pages = []
+            all_events = []
             for i, p in enumerate(paths):
                 print(f"Page {i + 1}/{len(paths)}: {os.path.basename(p)}")
-                pages.append(aa.annotate_page(p, args, key_acc))
+                img, events = aa.annotate_page(p, args, key_acc)
+                pages.append(img)
+                for e in events:
+                    e["page"] = i
+                all_events.extend(events)
             print("Assembling PDF...")
             pages[0].save("/output.pdf", save_all=True, append_images=pages[1:], resolution=150)
+            print("Writing MIDI files...")
+            equal_bytes, rhythm_bytes = aa.build_midi_files(all_events, method)
+            with open("/output_equal.mid", "wb") as f:
+                f.write(equal_bytes)
+            with open("/output_rhythm.mid", "wb") as f:
+                f.write(rhythm_bytes)
         return json.dumps({"ok": True, "log": buf.getvalue()})
     except SystemExit as e:
         return json.dumps({"ok": False, "log": buf.getvalue(), "error": str(e)})
@@ -300,7 +317,11 @@ function run(msg) {
     const result = JSON.parse(pyodide.runPython("run_annotate(**job)"));
     if (result.ok) {
       const pdf = pyodide.FS.readFile("/output.pdf");
-      postMessage({ type: "done", ok: true, log: result.log, pdf: pdf.buffer }, [pdf.buffer]);
+      const midEq = pyodide.FS.readFile("/output_equal.mid");
+      const midRhy = pyodide.FS.readFile("/output_rhythm.mid");
+      postMessage({ type: "done", ok: true, log: result.log, pdf: pdf.buffer,
+                    midiEqual: midEq.buffer, midiRhythm: midRhy.buffer },
+                  [pdf.buffer, midEq.buffer, midRhy.buffer]);
     } else {
       postMessage({ type: "done", ok: false, log: result.log, error: result.error });
     }
@@ -353,6 +374,10 @@ function finish(m) {
     setLog(m.log.trim());
     $("dl").href = URL.createObjectURL(new Blob([m.pdf], { type: "application/pdf" }));
     $("dl").download = `${jobName}_alto_${jobMethod}.pdf`;
+    $("dlmideq").href = URL.createObjectURL(new Blob([m.midiEqual], { type: "audio/midi" }));
+    $("dlmideq").download = `${jobName}_alto_${jobMethod}_equal.mid`;
+    $("dlmidrhy").href = URL.createObjectURL(new Blob([m.midiRhythm], { type: "audio/midi" }));
+    $("dlmidrhy").download = `${jobName}_alto_${jobMethod}_rhythm.mid`;
     $("download").style.display = "block";
     status("Done. Check the orange numbers, and pencil in any notes left blank.");
   } else {

@@ -47,6 +47,8 @@ Dependencies:  pip install opencv-python numpy Pillow
 
 import argparse
 import os
+import statistics
+import struct
 import sys
 from collections import Counter
 
@@ -87,6 +89,17 @@ METHOD_INFO = {
     "fourth": ("Up-a-fourth method: tenor positions, sounds a 4th higher",    (140, 40, 60)),
 }
 UNKNOWN_COLOR = (230, 130, 0)
+
+# How far each method's sounding pitch sits above the written note, in
+# semitones. Used when rendering MIDI so playback matches what the player
+# actually produces with the annotated positions.
+SOUNDING_SHIFT = {"pitch": 0, "octave": 12, "fourth": 5}
+
+MIDI_TPQ = 480          # MIDI ticks per quarter note
+MIDI_BPM = 90           # fixed playback tempo (quarter = 90)
+MIDI_PROGRAM = 56       # General MIDI 57 "Trombone" (0-based)
+MIDI_VELOCITY = 96
+DUR_CHOICES = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)   # quarter-note multiples
 
 # Major key signatures: letter -> semitone alteration
 FLAT_ORDER = ["B", "E", "A", "D", "G", "C", "F"]
@@ -143,6 +156,71 @@ def position_for(midi, method):
     if method == "octave":
         return ALTO.get(midi + 12)
     return TENOR.get(midi)
+
+
+# --------------------------------------------------------------------------
+# MIDI file generation
+# --------------------------------------------------------------------------
+
+def _vlq(n):
+    """Encode a non-negative int as a MIDI variable-length quantity."""
+    out = bytearray([n & 0x7F])
+    n >>= 7
+    while n:
+        out.insert(0, 0x80 | (n & 0x7F))
+        n >>= 7
+    return bytes(out)
+
+
+def write_midi_bytes(notes):
+    """Build a format-0 Standard MIDI File from (pitch, duration_ticks)
+    pairs played back to back, and return it as bytes."""
+    trk = bytearray()
+    trk += _vlq(0) + b"\xff\x51\x03" + (60_000_000 // MIDI_BPM).to_bytes(3, "big")
+    trk += _vlq(0) + b"\xff\x58\x04\x04\x02\x18\x08"       # 4/4
+    trk += _vlq(0) + bytes([0xC0, MIDI_PROGRAM])
+    for pitch, dur in notes:
+        p = max(0, min(127, int(pitch)))
+        trk += _vlq(0) + bytes([0x90, p, MIDI_VELOCITY])
+        trk += _vlq(max(1, int(dur))) + bytes([0x80, p, 0])
+    trk += _vlq(0) + b"\xff\x2f\x00"
+    return (b"MThd" + struct.pack(">IHHH", 6, 0, 1, MIDI_TPQ)
+            + b"MTrk" + struct.pack(">I", len(trk)) + bytes(trk))
+
+
+def guess_durations(events):
+    """Guess per-note durations (quarter-note multiples) from engraving
+    spacing: the gap to the next note on the same page and staff, in staff
+    spaces. The piece-wide median gap is taken as one quarter note and each
+    note's gap/median ratio is quantized to DUR_CHOICES (ties broken toward
+    the shorter value). The last note of each staff has no gap and gets 1.0."""
+    groups = {}
+    for idx, e in enumerate(events):
+        groups.setdefault((e["page"], e["staff"]), []).append(idx)
+    gaps, all_g = {}, []
+    for idxs in groups.values():
+        for a, b in zip(idxs, idxs[1:]):
+            g = (events[b]["cx"] - events[a]["cx"]) / events[a]["ss"]
+            if g > 0:
+                gaps[a] = g
+                all_g.append(g)
+    med = statistics.median(all_g) if all_g else 1.0
+    durs = [1.0] * len(events)
+    for idx, g in gaps.items():
+        r = g / med
+        durs[idx] = min(DUR_CHOICES, key=lambda v: (abs(v - r), v))
+    return durs
+
+
+def build_midi_files(events, method):
+    """Return (equal_bytes, rhythm_bytes): two MIDI renderings of the note
+    events at the sounding pitch of the chosen method — one with every note
+    a quarter, one with durations guessed from engraving spacing."""
+    pitches = [e["midi"] + SOUNDING_SHIFT[method] for e in events]
+    equal = [(p, MIDI_TPQ) for p in pitches]
+    rhythm = [(p, int(round(d * MIDI_TPQ)))
+              for p, d in zip(pitches, guess_durations(events))]
+    return write_midi_bytes(equal), write_midi_bytes(rhythm)
 
 
 # --------------------------------------------------------------------------
@@ -966,6 +1044,7 @@ def annotate_page(path, args, key_acc):
     dbg = color.copy() if args.debug else None
 
     total, guessed, blank = 0, 0, 0
+    events = []          # per-note data for MIDI rendering, in reading order
     for si, staff in enumerate(staves):
         _progress(f"Reading notes on staff {si + 1}/{len(staves)}")
         ss = staff["space"]
@@ -1006,7 +1085,10 @@ def annotate_page(path, args, key_acc):
 
             total += 1
             name = f"{letter}{ACC_MARK[alter]}{octave}{starred}"
-            pos = position_for(midi_of(letter, octave, alter), args.method)
+            midi = midi_of(letter, octave, alter)
+            pos = position_for(midi, args.method)
+            events.append({"midi": midi, "cx": float(cx), "staff": si,
+                           "measure": bar_i, "ss": float(ss), "page": 0})
             if pos and not verify:
                 label, col = pos, rgb
             elif pos:
@@ -1057,7 +1139,7 @@ def annotate_page(path, args, key_acc):
         if blank:
             bits.append(f"{blank} blank (no position for this method — pencil in)")
         print(f"  {guessed + blank}/{total} notes flagged: " + ", ".join(bits))
-    return out
+    return out, events
 
 
 def main():
@@ -1098,15 +1180,26 @@ def main():
         if args.key.upper() == "C":
             print("Note: using key of C (no sharps/flats). Use -k auto to read it from the image.")
 
-    pages = []
-    for p in args.images:
+    pages, all_events = [], []
+    for pi, p in enumerate(args.images):
         key_desc = "auto-detect" if key_acc is None else f"key of {args.key}"
         print(f"Processing {p} [{args.method}, {key_desc}] ...")
-        pages.append(annotate_page(p, args, key_acc))
+        img, events = annotate_page(p, args, key_acc)
+        pages.append(img)
+        for e in events:
+            e["page"] = pi
+        all_events.extend(events)
 
     outpath = args.output or os.path.splitext(args.images[0])[0] + f"_alto_{args.method}.pdf"
     pages[0].save(outpath, save_all=True, append_images=pages[1:], resolution=150)
     print(f"Wrote {outpath}")
+
+    base = os.path.splitext(outpath)[0]
+    equal_bytes, rhythm_bytes = build_midi_files(all_events, args.method)
+    for suffix, data in (("_equal.mid", equal_bytes), ("_rhythm.mid", rhythm_bytes)):
+        with open(base + suffix, "wb") as f:
+            f.write(data)
+        print(f"Wrote {base + suffix}")
 
 
 if __name__ == "__main__":
