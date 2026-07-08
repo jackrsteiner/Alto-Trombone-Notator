@@ -20,8 +20,11 @@ Usage:
   python alto_annotate.py scan.png -k Eb --debug             # save detection overlay
 
 Notes & limitations (lightweight OpenCV approach):
-  * Bass clef is assumed. Key signature comes from -k/--key (major keys:
-    C F Bb Eb Ab Db Gb G D A E B F#).
+  * Bass clef is assumed. The key signature is read from the image by
+    default (the printed flats/sharps after each clef, majority-voted
+    across staves). If it is read incorrectly, override it with -k/--key
+    (major keys: C F Bb Eb Ab Db Gb G D A E B F#). Detection is per page,
+    so mid-piece key changes are not handled.
   * Accidentals (sharp / flat / natural) in front of notes are detected and
     applied for the rest of their measure, like a human reader would. Glyphs
     that can't be classified confidently are flagged with an orange '?' so
@@ -43,6 +46,7 @@ Dependencies:  pip install opencv-python numpy Pillow
 import argparse
 import os
 import sys
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -87,6 +91,13 @@ FLAT_ORDER = ["B", "E", "A", "D", "G", "C", "F"]
 SHARP_ORDER = ["F", "C", "G", "D", "A", "E", "B"]
 KEYS = {"C": 0, "F": -1, "BB": -2, "EB": -3, "AB": -4, "DB": -5, "GB": -6,
         "G": 1, "D": 2, "A": 3, "E": 4, "B": 5, "F#": 6, "FS": 6}
+
+# Where key-signature glyphs sit in bass clef, as diatonic steps above the
+# bottom staff line (G2 = 0), and the key each accidental count spells.
+FLAT_STEPS  = [2, 5, 1, 4, 0, 3]        # Bb2 Eb3 Ab2 Db3 Gb2 Cb3
+SHARP_STEPS = [6, 3, 7, 4, 1, 5]        # F#3 C#3 G#3 D#3 A#2 E#3
+FLAT_KEYS   = ["C", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
+SHARP_KEYS  = ["C", "G", "D", "A", "E", "B", "F#"]
 
 SEMITONE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 LETTER_SEQ = ["G", "A", "B", "C", "D", "E", "F"]  # diatonic steps up from G
@@ -591,6 +602,92 @@ def try_accidental_clusters(win, glued, wx0, wy0, y0, ss, cx, cy):
 
 
 # --------------------------------------------------------------------------
+# Key signature detection
+# --------------------------------------------------------------------------
+
+def detect_staff_key(light, y0, staff):
+    """Read the key signature printed after the clef on one staff.
+    Returns ('flat' | 'sharp', count) or (None, 0) for no signature.
+    Candidate glyphs are validated against the vertical positions engraving
+    puts them at (FLAT_STEPS / SHARP_STEPS), which also keeps time-signature
+    digits from being mistaken for accidentals."""
+    ss = staff["space"]
+    h, w = light.shape
+    wx0 = min(w, max(0, int(staff["xstart"] + 2.6 * ss)))     # skip the clef
+    wx1 = min(w, int(staff["xstart"] + 10.5 * ss))
+    wy0 = max(0, int(staff["top"] - y0 - 1.5 * ss))
+    wy1 = min(h, int(staff["bottom"] - y0 + 1.5 * ss))
+    if wx1 - wx0 < 3 or wy1 - wy0 < 3:
+        return None, 0
+    win = light[wy0:wy1, wx0:wx1].copy()
+    strip_long_runs(win, int(1.5 * ss))
+
+    # Tiered fragment gluing as in find_accidental: these glyphs sit ON the
+    # staff lines, so line removal fragments them worse than anywhere else.
+    glyphs = []
+    for glue in (None, (1, 7), (3, 7)):
+        glued = win if glue is None else cv2.dilate(
+            win, cv2.getStructuringElement(cv2.MORPH_RECT, glue))
+        n, lab, _, _ = cv2.connectedComponentsWithStats(glued, 8)
+        for i in range(1, n):
+            cluster = (lab == i) & (win > 0)
+            ys, xs = np.nonzero(cluster)
+            if len(xs) == 0:
+                continue
+            x, y = xs.min(), ys.min()
+            ww, hh = xs.max() - x + 1, ys.max() - y + 1
+            if not (1.5 * ss < hh < 3.3 * ss and 0.35 * ss < ww < 1.4 * ss):
+                continue
+            kind = classify_accidental(
+                cluster[y:y + hh, x:x + ww].astype(np.uint8) * 255, ss)
+            glyphs.append((x, y, ww, hh, kind))
+        if any(g[4] in ("flat", "sharp") for g in glyphs):
+            break
+        glyphs = []
+    if not glyphs:
+        return None, 0
+
+    # Accept the leading left-to-right run of same-type accidentals whose
+    # steps follow the expected sequence. A flat is anchored at its lower
+    # loop (the stem rises ~1.5 steps above the notated position); a sharp
+    # at its centre.
+    expect = {"flat": FLAT_STEPS, "sharp": SHARP_STEPS}
+    run_type, count, last_x = None, 0, 0
+    for x, y, ww, hh, kind in sorted(glyphs, key=lambda g: g[0]):
+        if kind not in ("flat", "sharp"):
+            if run_type:
+                break            # time signature or other clutter: run is over
+            continue             # sliver of the clef edge: keep looking
+        anchor = y + hh - 0.5 * ss if kind == "flat" else y + hh / 2.0
+        step = 2 * (staff["bottom"] - (wy0 + anchor + y0)) / ss
+        if run_type is None:
+            if abs(step - expect[kind][0]) <= 0.7:
+                run_type, count, last_x = kind, 1, x
+            continue
+        if (kind != run_type or count >= 6
+                or not (0.5 * ss < x - last_x < 2.2 * ss)
+                or abs(step - expect[kind][count]) > 0.7):
+            break
+        count, last_x = count + 1, x
+    return (run_type, count) if run_type else (None, 0)
+
+
+def detect_key_signature(staves, rois):
+    """Majority-vote the page's key across its staves.
+    rois is the [(healed, light, y0)] list parallel to staves.
+    Returns (key_name, votes_for_winner, staff_count)."""
+    votes = []
+    for staff, (_, light, y0) in zip(staves, rois):
+        kind, n = detect_staff_key(light, y0, staff)
+        votes.append((SHARP_KEYS if kind == "sharp" else FLAT_KEYS)[n])
+    tally = Counter(votes)
+    # A staff whose glyphs were unreadable votes C, so ties favour a real
+    # signature over an empty reading.
+    key, n = max(tally.items(), key=lambda kv: (kv[1], kv[0] != "C"))
+    return key, n, len(votes)
+
+
+# --------------------------------------------------------------------------
 # Annotation
 # --------------------------------------------------------------------------
 
@@ -614,6 +711,15 @@ def annotate_page(path, args, key_acc):
     if not staves:
         sys.exit(f"No staves found in {path} — try a cleaner/flatter image.")
 
+    rois = [clean_staff_roi(bw, staff, args.ledger_range) for staff in staves]
+    if key_acc is None:
+        key_name, agree, nstaves = detect_key_signature(staves, rois)
+        k = KEYS[key_name.upper()]
+        desc = ("no sharps or flats" if k == 0
+                else f"{abs(k)} {'flat' if k < 0 else 'sharp'}{'s' if abs(k) > 1 else ''}")
+        print(f"  detected key: {key_name} major ({desc}; {agree}/{nstaves} staves agree)")
+        key_acc = key_accidentals(key_name)
+
     caption, rgb = METHOD_INFO[args.method]
     img = Image.fromarray(cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img)
@@ -623,7 +729,7 @@ def annotate_page(path, args, key_acc):
     for si, staff in enumerate(staves):
         ss = staff["space"]
         font = load_font(max(12, int(1.5 * ss)))
-        healed, light, y0 = clean_staff_roi(bw, staff, args.ledger_range)
+        healed, light, y0 = rois[si]
         heads = detect_noteheads(healed, light, y0, staff, args.ledger_range,
                                  args.sensitivity, args.skip_left)
         heads.extend(rescue_whole_notes(healed, bw, y0, staff, heads, ss,
@@ -712,8 +818,10 @@ def main():
     ap.add_argument("images", nargs="+", help="sheet music image file(s), in page order")
     ap.add_argument("-m", "--method", choices=["octave", "pitch", "fourth"],
                     default="octave", help="annotation method (default: octave)")
-    ap.add_argument("-k", "--key", default="C",
-                    help="major key signature, e.g. Eb, F, G (default: C)")
+    ap.add_argument("-k", "--key", default="auto",
+                    help='major key signature, e.g. Eb, F, G, or "auto" to read it '
+                         "from the image (default: auto). Pass a key explicitly if "
+                         "auto-detection reads it wrong.")
     ap.add_argument("-o", "--output", help="output PDF path")
     ap.add_argument("--placement", choices=["below", "above"], default="below",
                     help="print numbers below (default) or above the notes")
@@ -732,13 +840,17 @@ def main():
                          "and barlines")
     args = ap.parse_args()
 
-    key_acc = key_accidentals(args.key)
-    if args.key.upper() == "C":
-        print("Note: using key of C (no sharps/flats). Pass -k if the piece has a key signature.")
+    if args.key.strip().lower() == "auto":
+        key_acc = None
+    else:
+        key_acc = key_accidentals(args.key)
+        if args.key.upper() == "C":
+            print("Note: using key of C (no sharps/flats). Use -k auto to read it from the image.")
 
     pages = []
     for p in args.images:
-        print(f"Processing {p} [{args.method}, key of {args.key}] ...")
+        key_desc = "auto-detect" if key_acc is None else f"key of {args.key}"
+        print(f"Processing {p} [{args.method}, {key_desc}] ...")
         pages.append(annotate_page(p, args, key_acc))
 
     outpath = args.output or os.path.splitext(args.images[0])[0] + f"_alto_{args.method}.pdf"
