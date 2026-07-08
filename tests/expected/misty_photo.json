@@ -1,0 +1,15 @@
+{
+  "description": "Tolerant acceptance criteria: real phone photo (Misty, trombone). Exercises deskew, page-curvature dewarp, adaptive thresholding, chord-symbol immunity and the native high-resolution path. Bands are loose enough to survive minor library-version drift but tight enough to catch real regressions.",
+  "strict": false,
+  "key_contains": "detected key: Eb major (3 flats",
+  "upscale_message": null,
+  "staves": 8,
+  "staff_note_counts": [15, 16, 8, 16, 16, 16, 19, 8],
+  "staff_note_count_tolerance": 2,
+  "total_notes_min": 105,
+  "midi_min": 40,
+  "midi_max": 70,
+  "flagged_orange_max": 12,
+  "flagged_blank_max": 0,
+  "annotated_width": 4898
+}
