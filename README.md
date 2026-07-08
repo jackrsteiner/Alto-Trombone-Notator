@@ -84,6 +84,7 @@ Alongside the PDF, two MIDI files are always written next to it (names follow `-
 - Multi-page input to a single multi-page PDF.
 - **Two Standard MIDI Files per run**, playing the detected notes at the **sounding pitch** of the chosen method (as written for `pitch`, an octave up for `octave`, a fourth up for `fourth`): one with every note an even quarter, one with durations **guessed from the engraving's note spacing** (quantized eighth through whole notes). Fixed tempo, quarter = 90 BPM — change it in any MIDI player or DAW.
 - Deskewing of tilted photos, straightening of bowed staff lines (page curvature in phone photos), and adaptive thresholding for uneven lighting.
+- **Low-resolution images** (small staff spacing, e.g. preview downloads) are automatically upscaled before reading — the log shows an `upscaling Nx` line when this happens. The output PDF keeps the original page size.
 
 ## What it doesn't do
 

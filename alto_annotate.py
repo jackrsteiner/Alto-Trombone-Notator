@@ -234,7 +234,7 @@ def deskew(gray, color):
                             minLineLength=gray.shape[1] // 3, maxLineGap=20)
     angles = []
     if lines is not None:
-        for x1, y1, x2, y2 in lines[:, 0]:
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
             a = np.degrees(np.arctan2(y2 - y1, x2 - x1))
             if abs(a) < 10:
                 angles.append(a)
@@ -592,7 +592,8 @@ def upward_run(healed, ss, cx, cy_local):
     return best
 
 
-def detect_noteheads(healed, light, y0, staff, ledger_range, sensitivity, skip_left):
+def detect_noteheads(healed, light, y0, staff, ledger_range, sensitivity, skip_left,
+                     lines_mask=None):
     """Return [(cx, cy)] of notehead centres from a healed staff ROI."""
     ss = staff["space"]
     filled = fill_small_holes(healed, max_area=1.6 * ss * ss)
@@ -678,6 +679,14 @@ def detect_noteheads(healed, light, y0, staff, ledger_range, sensitivity, skip_l
             continue  # clef / key signature / time signature zone
         if not (staff["top"] - ledger_range * ss - 0.6 * ss < cy < staff["bottom"] + ledger_range * ss + 0.6 * ss):
             continue
+        if (lines_mask is not None
+                and (cy < staff["top"] - 2.2 * ss or cy > staff["bottom"] + 2.2 * ss)):
+            # this far out a real note must sit on or next to a ledger line;
+            # tempo text, lyrics and copyright lines have none
+            yA, yB = max(0, int(cy - 0.7 * ss)), int(cy + 0.7 * ss)
+            xA, xB = max(0, int(cx - 0.8 * ss)), int(cx + 0.8 * ss)
+            if not lines_mask[yA:yB, xA:xB].any():
+                continue
         # ink-profile validation: a notehead is WIDE and SHORT at its centre
         hrun = ink_run(filled, int(cy - y0), int(cx), axis=1)
         vrun = ink_run(filled, int(cy - y0), int(cx), axis=0)
@@ -1012,6 +1021,23 @@ def annotate_page(path, args, key_acc):
         sys.exit(f"Could not read image: {path}")
     _progress(f"Loaded {os.path.basename(path)} ({color.shape[1]}x{color.shape[0]}px)")
     gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    # Low-resolution pages (previews, heavily compressed photos) put the staff
+    # space below what the detectors can work with: noteheads sitting on a
+    # staff line get erased with it, and key-signature glyphs are too small to
+    # classify. Upscale until the staff space is comfortable; the annotated
+    # image is scaled back down before the PDF is assembled.
+    scale = 1
+    pre_staves, _ = find_staves(binarize(gray))
+    if pre_staves:
+        ss_med = float(np.median([s["space"] for s in pre_staves]))
+        if ss_med < 16.0:
+            scale = min(4, int(np.ceil(22.0 / ss_med)))
+            _progress(f"Low-resolution page (staff space {ss_med:.0f}px) - "
+                      f"upscaling {scale}x for detection")
+            gray = cv2.resize(gray, None, fx=scale, fy=scale,
+                              interpolation=cv2.INTER_CUBIC)
+            color = cv2.resize(color, None, fx=scale, fy=scale,
+                               interpolation=cv2.INTER_CUBIC)
     gray, color, angle = deskew(gray, color)
     if angle:
         _progress(f"Deskewed the page ({angle:+.2f} degrees of tilt)")
@@ -1025,6 +1051,10 @@ def annotate_page(path, args, key_acc):
         sys.exit(f"No staves found in {path} — try a cleaner/flatter image.")
     _progress(f"Found {len(staves)} staves")
 
+    ss_med = float(np.median([s["space"] for s in staves]))
+    lines_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
+                                  cv2.getStructuringElement(cv2.MORPH_RECT,
+                                                            (max(9, int(1.5 * ss_med)), 1)))
     rois = []
     for si, staff in enumerate(staves):
         _progress(f"Isolating staff {si + 1}/{len(staves)} (removing staff lines)")
@@ -1051,7 +1081,7 @@ def annotate_page(path, args, key_acc):
         font = load_font(max(12, int(1.5 * ss)))
         healed, light, y0 = rois[si]
         heads = detect_noteheads(healed, light, y0, staff, args.ledger_range,
-                                 args.sensitivity, args.skip_left)
+                                 args.sensitivity, args.skip_left, lines_mask)
         heads.extend(rescue_whole_notes(healed, bw, y0, staff, heads, ss,
                                         args.skip_left, args.ledger_range))
         heads.sort(key=lambda p: p[0])
@@ -1117,7 +1147,9 @@ def annotate_page(path, args, key_acc):
                 cv2.line(dbg, (int(bx), int(staff["top"])), (int(bx), int(staff["bottom"])),
                          (255, 0, 200), 2)
 
-    ss0 = staves[0]["space"]
+    if scale > 1:
+        img = img.resize((img.width // scale, img.height // scale), Image.LANCZOS)
+    ss0 = staves[0]["space"] / scale
     strip = int(3 * ss0)
     out = Image.new("RGB", (img.width, img.height + strip), "white")
     out.paste(img, (0, 0))
