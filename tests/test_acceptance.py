@@ -112,6 +112,31 @@ class TestMistyPhotoTolerant:
         assert misty.flagged_blank <= self.exp["flagged_blank_max"]
 
 
+# ------------------------------------------------------------- Caption helpers
+
+class TestKeyCaption:
+    def test_describe_key(self):
+        assert (aa.describe_key("Eb", -3, "auto-detected")
+                == "key of Eb major (3 flats), auto-detected")
+        assert (aa.describe_key("F", -1, "set manually")
+                == "key of F major (1 flat), set manually")
+        assert (aa.describe_key("C", 0, "set manually")
+                == "key of C major (no sharps or flats), set manually")
+
+    def test_manual_key_normalisation(self):
+        # user-typed key -> canonical caption name, via the same cleaning
+        # key_accidentals uses
+        for typed, name in (("eb", "Eb"), ("E♭", "Eb"), ("F#", "F#"),
+                            ("FS", "F#"), ("c", "C"), ("bb", "Bb")):
+            k = aa._key_number(typed)
+            assert k is not None, typed
+            canonical = aa.FLAT_KEYS[-k] if k < 0 else aa.SHARP_KEYS[k]
+            assert canonical == name
+
+    def test_unknown_key_is_none(self):
+        assert aa._key_number("H") is None
+
+
 # ---------------------------------------------------------------------- Shared
 
 def test_pdf_assembly(louie, misty, tmp_path):

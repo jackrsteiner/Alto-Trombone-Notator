@@ -132,13 +132,31 @@ def _progress(msg):
             pass
 
 
+def _key_number(key):
+    """Signed accidental count for a user-typed key name, or None if unknown."""
+    return KEYS.get(key.strip().upper().replace("♭", "B").replace("♯", "#"))
+
+
 def key_accidentals(key):
-    k = KEYS.get(key.strip().upper().replace("♭", "B").replace("♯", "#"))
+    k = _key_number(key)
     if k is None:
         sys.exit(f"Unknown key '{key}'. Use one of: C F Bb Eb Ab Db Gb G D A E B F#")
     if k < 0:
         return {ltr: -1 for ltr in FLAT_ORDER[:-k]}
     return {ltr: +1 for ltr in SHARP_ORDER[:k]}
+
+
+def signature_desc(k):
+    """Human description of a signed accidental count: '3 flats', '1 sharp'."""
+    if k == 0:
+        return "no sharps or flats"
+    return f"{abs(k)} {'flat' if k < 0 else 'sharp'}{'s' if abs(k) > 1 else ''}"
+
+
+def describe_key(name, k, source):
+    """Caption fragment naming the key a page was read in and where it came
+    from, e.g. 'key of Eb major (3 flats), auto-detected'."""
+    return f"key of {name} major ({signature_desc(k)}), {source}"
 
 
 def step_to_letter(step):
@@ -1063,10 +1081,14 @@ def annotate_page(path, args, key_acc):
         _progress("Reading the key signature after each clef")
         key_name, agree, nstaves = detect_key_signature(staves, rois)
         k = KEYS[key_name.upper()]
-        desc = ("no sharps or flats" if k == 0
-                else f"{abs(k)} {'flat' if k < 0 else 'sharp'}{'s' if abs(k) > 1 else ''}")
-        print(f"  detected key: {key_name} major ({desc}; {agree}/{nstaves} staves agree)")
+        print(f"  detected key: {key_name} major ({signature_desc(k)}; "
+              f"{agree}/{nstaves} staves agree)")
         key_acc = key_accidentals(key_name)
+        key_label = describe_key(key_name, k, "auto-detected")
+    else:
+        k = _key_number(args.key)
+        key_label = describe_key(FLAT_KEYS[-k] if k < 0 else SHARP_KEYS[k],
+                                 k, "set manually")
 
     caption, rgb = METHOD_INFO[args.method]
     img = Image.fromarray(cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
@@ -1153,9 +1175,14 @@ def annotate_page(path, args, key_acc):
     strip = int(3 * ss0)
     out = Image.new("RGB", (img.width, img.height + strip), "white")
     out.paste(img, (0, 0))
-    ImageDraw.Draw(out).text((int(ss0), img.height + int(0.7 * ss0)),
-                             f"Alto trombone (Eb) — {caption}",
-                             fill=rgb, font=load_font(max(12, int(1.3 * ss0))))
+    footer = f"Alto trombone (Eb) — {caption} — {key_label}"
+    fdraw = ImageDraw.Draw(out)
+    fsize = max(12, int(1.3 * ss0))
+    font = load_font(fsize)
+    while fsize > 10 and fdraw.textlength(footer, font=font) > out.width - 2 * ss0:
+        fsize -= 1
+        font = load_font(fsize)
+    fdraw.text((int(ss0), img.height + int(0.7 * ss0)), footer, fill=rgb, font=font)
     if args.debug:
         dpath = os.path.splitext(path)[0] + "_debug.png"
         cv2.imwrite(dpath, dbg)
