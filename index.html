@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alto Trombone Position Annotator</title>
+<style>
+  :root {
+    --paper: #FAF7F0;
+    --ink: #1A1815;
+    --faint: #6B655B;
+    --rule: #D8D2C4;
+    --brass: #A67C1E;
+    --brass-dark: #7E5D14;
+    --octave: #0A6940;
+    --pitch: #23378C;
+    --fourth: #8C2838;
+    --flag: #E68200;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    line-height: 1.55;
+    font-size: 17px;
+  }
+  main { max-width: 660px; margin: 0 auto; padding: 40px 20px 80px; }
+
+  header h1 {
+    font-size: 1.9rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin: 0 0 4px;
+  }
+  header p.sub { margin: 0 0 14px; color: var(--faint); font-style: italic; }
+  .staff { display: block; margin: 18px 0 30px; }
+  .staff hr {
+    border: none; border-top: 1px solid var(--ink);
+    opacity: 0.55; margin: 5px 0;
+  }
+
+  fieldset { border: none; margin: 0 0 26px; padding: 0; }
+  legend {
+    font-size: 0.8rem; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--faint); padding: 0; margin-bottom: 10px;
+  }
+
+  /* method cards, coloured to match the ink used in the annotated PDF */
+  .methods { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .methods label {
+    border: 1.5px solid var(--rule); border-radius: 6px;
+    padding: 12px 12px 10px; cursor: pointer; background: #fff;
+    display: block;
+  }
+  .methods input { position: absolute; opacity: 0; }
+  .methods b { display: block; font-size: 1.02rem; font-weight: 600; }
+  .methods small { color: var(--faint); font-size: 0.8rem; line-height: 1.35; display: block; margin-top: 3px; }
+  .methods label[data-m="octave"] b { color: var(--octave); }
+  .methods label[data-m="pitch"]  b { color: var(--pitch); }
+  .methods label[data-m="fourth"] b { color: var(--fourth); }
+  .methods label:has(input:checked) { border-width: 2.5px; padding: 11px 11px 9px; }
+  .methods label[data-m="octave"]:has(input:checked) { border-color: var(--octave); }
+  .methods label[data-m="pitch"]:has(input:checked)  { border-color: var(--pitch); }
+  .methods label[data-m="fourth"]:has(input:checked) { border-color: var(--fourth); }
+  @media (max-width: 520px) { .methods { grid-template-columns: 1fr; } }
+
+  .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field span { font-size: 0.8rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+  select, input[type=number] {
+    font: inherit; padding: 8px 10px; border: 1.5px solid var(--rule);
+    border-radius: 6px; background: #fff; color: var(--ink); min-width: 90px;
+  }
+  input[type=file] { font: inherit; width: 100%; }
+  .filebox {
+    border: 1.5px dashed var(--rule); border-radius: 6px;
+    background: #fff; padding: 16px;
+  }
+  .filebox p { margin: 8px 0 0; font-size: 0.85rem; color: var(--faint); }
+
+  details { margin-bottom: 26px; }
+  summary {
+    cursor: pointer; color: var(--brass-dark); font-size: 0.95rem;
+  }
+  details .row { margin-top: 14px; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 0.95rem; }
+
+  button#run {
+    font: inherit; font-size: 1.05rem; font-weight: 600;
+    background: var(--brass); color: #fff; border: none; border-radius: 6px;
+    padding: 12px 34px; cursor: pointer; letter-spacing: 0.02em;
+  }
+  button#run:hover:not(:disabled) { background: var(--brass-dark); }
+  button#run:disabled { background: var(--rule); color: var(--faint); cursor: default; }
+  button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible, a:focus-visible {
+    outline: 2.5px solid var(--brass); outline-offset: 2px;
+  }
+
+  #status { margin: 18px 0 0; font-size: 0.95rem; color: var(--faint); min-height: 1.4em; }
+  #status.err { color: var(--fourth); }
+
+  #log {
+    display: none; margin-top: 18px; padding: 14px 16px;
+    background: #14120E; color: #E8E2D4; border-radius: 6px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap;
+    overflow-x: auto;
+  }
+  #download {
+    display: none; margin-top: 20px;
+  }
+  #download a {
+    display: inline-block; font-weight: 600; color: #fff;
+    background: var(--octave); text-decoration: none;
+    padding: 12px 30px; border-radius: 6px;
+  }
+  .note { font-size: 0.85rem; color: var(--faint); margin-top: 30px; border-top: 1px solid var(--rule); padding-top: 14px; }
+  .note b.q { color: var(--flag); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Alto Trombone Position Annotator</h1>
+    <p class="sub">Slide positions, printed under every note &mdash; for tenor trombone sheet music played on an E&flat; alto.</p>
+    <div class="staff" aria-hidden="true"><hr><hr><hr><hr><hr></div>
+  </header>
+
+  <fieldset>
+    <legend>Sheet music</legend>
+    <div class="filebox">
+      <input type="file" id="files" accept="image/*" multiple>
+      <p>One image per page (PNG or JPG), selected in page order. Scans work best; phone photos are deskewed automatically but should be as flat and evenly lit as possible.</p>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Method &mdash; the number colour in your PDF matches the card</legend>
+    <div class="methods">
+      <label data-m="octave"><input type="radio" name="method" value="octave" checked>
+        <b>Octave up</b><small>Same key, sounds one octave above written. The usual choice.</small></label>
+      <label data-m="pitch"><input type="radio" name="method" value="pitch">
+        <b>Written pitch</b><small>Play exactly what is written, standard alto positions.</small></label>
+      <label data-m="fourth"><input type="radio" name="method" value="fourth">
+        <b>Up a fourth</b><small>Read with tenor positions; sounds a perfect fourth higher.</small></label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Key signature</legend>
+    <div class="row">
+      <label class="field"><span>Major key</span>
+        <select id="key">
+          <option>C</option><option>F</option><option selected>Bb</option><option>Eb</option>
+          <option>Ab</option><option>Db</option><option>Gb</option><option>G</option>
+          <option>D</option><option>A</option><option>E</option><option>B</option><option>F#</option>
+        </select>
+      </label>
+      <label class="field"><span>Numbers go</span>
+        <select id="placement"><option value="below" selected>Below the notes</option><option value="above">Above the notes</option></select>
+      </label>
+    </div>
+  </fieldset>
+
+  <details>
+    <summary>Advanced settings</summary>
+    <div class="row">
+      <label class="field"><span>Ledger range</span><input type="number" id="ledger" value="4.5" step="0.5" min="1" max="8"></label>
+      <label class="field"><span>Sensitivity</span><input type="number" id="sens" value="1.0" step="0.05" min="0.6" max="1.4"></label>
+      <label class="field"><span>Skip left (staff spaces)</span><input type="number" id="skip" value="8.0" step="0.5" min="0" max="16"></label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label class="check"><input type="checkbox" id="noacc"> Ignore printed accidentals (key signature only)</label>
+    </div>
+  </details>
+
+  <button id="run" disabled>Loading&hellip;</button>
+  <p id="status" role="status">Preparing the Python runtime. The first visit downloads about 60&ndash;90&nbsp;MB; later visits use the cache.</p>
+
+  <pre id="log"></pre>
+  <div id="download"><a id="dl" download>Download annotated PDF</a></div>
+
+  <p class="note">Everything runs in your browser &mdash; images never leave this device. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number or <b>?</b> means &ldquo;verify this one by eye&rdquo;.</p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const status = (msg, err=false) => { $("status").textContent = msg; $("status").className = err ? "err" : ""; };
+
+let pyodide = null;
+
+const RUNNER = `
+import io, os, json, contextlib, traceback
+from types import SimpleNamespace
+import alto_annotate as aa
+
+def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_left, no_accidentals):
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            args = SimpleNamespace(method=method, key=key, placement=placement,
+                                   ledger_range=float(ledger_range), sensitivity=float(sensitivity),
+                                   skip_left=float(skip_left), no_accidentals=bool(no_accidentals),
+                                   debug=False)
+            key_acc = aa.key_accidentals(key)
+            pages = [aa.annotate_page(p, args, key_acc) for p in paths]
+            pages[0].save("/output.pdf", save_all=True, append_images=pages[1:], resolution=150)
+        return json.dumps({"ok": True, "log": buf.getvalue()})
+    except SystemExit as e:
+        return json.dumps({"ok": False, "log": buf.getvalue(), "error": str(e)})
+    except Exception:
+        return json.dumps({"ok": False, "log": buf.getvalue(), "error": traceback.format_exc()})
+`;
+
+async function init() {
+  try {
+    status("Loading Python runtime (first visit downloads 60\u201390 MB)\u2026");
+    pyodide = await loadPyodide();
+    status("Loading numpy, OpenCV and Pillow\u2026");
+    await pyodide.loadPackage(["numpy", "opencv-python", "pillow"]);
+
+    status("Loading the annotator script\u2026");
+    const scriptResp = await fetch("alto_annotate.py");
+    if (!scriptResp.ok) throw new Error("alto_annotate.py not found next to index.html");
+    pyodide.FS.writeFile("/alto_annotate.py", await scriptResp.text());
+
+    // font for the printed numbers; the script falls back to a basic font if this fails
+    try {
+      const fontResp = await fetch("https://cdn.jsdelivr.net/npm/dejavu-fonts-ttf@2.37.3/ttf/DejaVuSans-Bold.ttf");
+      if (fontResp.ok) {
+        const dirs = ["/usr", "/usr/share", "/usr/share/fonts", "/usr/share/fonts/truetype", "/usr/share/fonts/truetype/dejavu"];
+        for (const d of dirs) { try { pyodide.FS.mkdir(d); } catch (e) {} }
+        pyodide.FS.writeFile("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                             new Uint8Array(await fontResp.arrayBuffer()));
+      }
+    } catch (e) { /* non-fatal */ }
+
+    pyodide.runPython(RUNNER);
+    $("run").disabled = false;
+    $("run").textContent = "Annotate";
+    status("Ready. Choose your image(s) and press Annotate.");
+  } catch (e) {
+    status("Could not start: " + e.message, true);
+  }
+}
+
+async function annotate() {
+  const files = $("files").files;
+  if (!files.length) { status("Choose at least one image first.", true); return; }
+
+  $("run").disabled = true;
+  $("download").style.display = "none";
+  $("log").style.display = "none";
+  status("Annotating\u2026 this can take a few seconds per page.");
+  await new Promise(r => setTimeout(r, 30));   // let the UI paint
+
+  try {
+    try { pyodide.FS.mkdir("/uploads"); } catch (e) {}
+    const paths = [];
+    for (let i = 0; i < files.length; i++) {
+      const safe = files[i].name.replace(/[^A-Za-z0-9._-]/g, "_");
+      const p = `/uploads/${String(i).padStart(2, "0")}_${safe}`;
+      pyodide.FS.writeFile(p, new Uint8Array(await files[i].arrayBuffer()));
+      paths.push(p);
+    }
+
+    pyodide.globals.set("job", pyodide.toPy({
+      paths,
+      method: document.querySelector("input[name=method]:checked").value,
+      key: $("key").value,
+      placement: $("placement").value,
+      ledger_range: parseFloat($("ledger").value) || 4.5,
+      sensitivity: parseFloat($("sens").value) || 1.0,
+      skip_left: parseFloat($("skip").value) || 8.0,
+      no_accidentals: $("noacc").checked,
+    }));
+    const result = JSON.parse(pyodide.runPython("run_annotate(**job)"));
+
+    if (result.log) { $("log").textContent = result.log.trim(); $("log").style.display = "block"; }
+
+    if (result.ok) {
+      const pdf = pyodide.FS.readFile("/output.pdf");
+      const url = URL.createObjectURL(new Blob([pdf], { type: "application/pdf" }));
+      const base = files[0].name.replace(/\.[^.]+$/, "");
+      $("dl").href = url;
+      $("dl").download = `${base}_alto_${document.querySelector("input[name=method]:checked").value}.pdf`;
+      $("download").style.display = "block";
+      status("Done. Check any orange numbers against the printed page.");
+    } else {
+      status("Annotation failed \u2014 details below.", true);
+      $("log").textContent = (result.log + "\n" + result.error).trim();
+      $("log").style.display = "block";
+    }
+  } catch (e) {
+    status("Unexpected error: " + e.message, true);
+  } finally {
+    $("run").disabled = false;
+  }
+}
+
+$("run").addEventListener("click", annotate);
+init();
+</script>
+</body>
+</html>
