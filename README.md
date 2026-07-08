@@ -28,9 +28,9 @@ Any other static host (Netlify, Cloudflare Pages, a plain web server) works the 
 
 1. Wait for the runtime to load. The **first visit downloads roughly 60–90 MB** (Python, numpy, OpenCV, Pillow); later visits use the browser cache and start much faster.
 2. Choose one image per page of music, in page order. PNG or JPG.
-3. Pick a method, the piece's **major key signature**, and where the numbers should go.
+3. Pick a method and where the numbers should go. The **key signature is read from the image automatically**; leave the key on *Auto-detect* unless the log's `detected key` line disagrees with the printed signature, in which case pick the major key yourself and run again.
 4. Press **Annotate**. A few seconds per page is normal (longer on phones).
-5. Review the detection log, then download the PDF.
+5. Review the detection log (including the `detected key` line), then download the PDF.
 
 The site works on mobile browsers (Safari, Chrome). The first-visit download is the main cost — do it on Wi-Fi. On a phone you can photograph the music directly from the file picker.
 
@@ -47,7 +47,7 @@ The site works on mobile browsers (Safari, Chrome). The first-visit download is 
 
 ```
 pip install opencv-python numpy Pillow
-python alto_annotate.py score.png -m octave -k Eb
+python alto_annotate.py score.png -m octave          # key read from the image
 python alto_annotate.py page1.jpg page2.jpg -k F -o out.pdf
 python alto_annotate.py scan.png -k Bb --placement above --debug
 ```
@@ -55,7 +55,7 @@ python alto_annotate.py scan.png -k Bb --placement above --debug
 | Flag | Meaning |
 |---|---|
 | `-m`, `--method` | `octave` (default), `pitch`, or `fourth` |
-| `-k`, `--key` | Major key signature: `C F Bb Eb Ab Db Gb G D A E B F#` (default `C`) |
+| `-k`, `--key` | Major key signature: `C F Bb Eb Ab Db Gb G D A E B F#`, or `auto` (the default) to read it from the printed signature. Pass a key explicitly if auto-detection reads it wrong |
 | `-o`, `--output` | Output PDF path (default: next to the first input image) |
 | `--placement` | `below` (default) or `above` the notes |
 | `--ledger-range`, `--sensitivity`, `--skip-left` | Same as the website's advanced settings |
@@ -74,6 +74,7 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 ## What it does
 
 - Bass clef music: solo lines, one note at a time.
+- **Key signature detection**: the printed flats or sharps after each clef are read and majority-voted across the page's staves (each page is detected independently). The result is printed as a `detected key` line; a manual key always overrides it.
 - Solid (quarter/eighth), half and whole noteheads, on the staff and on ledger lines.
 - Printed **sharps, flats and naturals**, applied for the rest of their measure like a human reader would; barlines are detected to know where measures end.
 - Multi-page input to a single multi-page PDF.
@@ -83,7 +84,8 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 
 - **No treble/tenor/alto clefs** — bass clef is assumed everywhere.
 - **No chords** — stacked noteheads on one stem will not be read reliably.
-- **No minor keys as such** — pass the relative major (for C minor, use `Eb`).
+- **No minor keys as such** — the signature is what's detected, which serves minor keys fine; when overriding manually, pass the relative major (for C minor, use `Eb`).
+- **No mid-piece key changes** — one key per page. If the signature changes mid-page, split the pages or annotate the sections separately with explicit `-k` values. Cancellation naturals in a key change are not understood.
 - **No double sharps/flats, no courtesy accidentals in parentheses.**
 - **Ties across a barline don't carry their accidental** — the alteration resets at the bar, so the second tied note may be annotated a half step off. Ties within a measure are fine.
 - **Rhythm is ignored** — it annotates pitches; it doesn't know a quarter note from an eighth.

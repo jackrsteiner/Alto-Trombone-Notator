@@ -149,11 +149,12 @@
   </fieldset>
 
   <fieldset>
-    <legend>Key signature</legend>
+    <legend>Key signature &mdash; read from the image; pick a key only to override</legend>
     <div class="row">
       <label class="field"><span>Major key</span>
         <select id="key">
-          <option>C</option><option>F</option><option selected>Bb</option><option>Eb</option>
+          <option value="auto" selected>Auto-detect</option>
+          <option>C</option><option>F</option><option>Bb</option><option>Eb</option>
           <option>Ab</option><option>Db</option><option>Gb</option><option>G</option>
           <option>D</option><option>A</option><option>E</option><option>B</option><option>F#</option>
         </select>
@@ -182,7 +183,7 @@
   <pre id="log"></pre>
   <div id="download"><a id="dl" download>Download annotated PDF</a></div>
 
-  <p class="note">Everything runs in your browser &mdash; images never leave this device. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number or <b>?</b> means &ldquo;verify this one by eye&rdquo;.</p>
+  <p class="note">Everything runs in your browser &mdash; images never leave this device. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number or <b>?</b> means &ldquo;verify this one by eye&rdquo;. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
 </main>
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
@@ -205,7 +206,7 @@ def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_
                                    ledger_range=float(ledger_range), sensitivity=float(sensitivity),
                                    skip_left=float(skip_left), no_accidentals=bool(no_accidentals),
                                    debug=False)
-            key_acc = aa.key_accidentals(key)
+            key_acc = None if key == "auto" else aa.key_accidentals(key)
             pages = [aa.annotate_page(p, args, key_acc) for p in paths]
             pages[0].save("/output.pdf", save_all=True, append_images=pages[1:], resolution=150)
         return json.dumps({"ok": True, "log": buf.getvalue()})
