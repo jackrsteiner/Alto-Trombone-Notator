@@ -42,6 +42,7 @@ The site works on mobile browsers (Safari, Chrome). The first-visit download is 
 | Sensitivity | 1.0 | Notehead detector strictness. Lower (e.g. 0.85) finds fainter noteheads but risks false positives — try lowering it for poor photos |
 | Skip left | 8.0 | Staff spaces skipped at the left of each staff (clef, key and time signature zone). Lower it if a pickup note at the very start of a line is missed |
 | Ignore printed accidentals | off | Reads by key signature only. Use if a messy scan produces many false accidental detections |
+| Skip page-curvature correction | off | Disables the automatic straightening of bowed staff lines in photos. Use if the correction itself distorts a page |
 
 ## The command-line script
 
@@ -60,6 +61,7 @@ python alto_annotate.py scan.png -k Bb --placement above --debug
 | `--placement` | `below` (default) or `above` the notes |
 | `--ledger-range`, `--sensitivity`, `--skip-left` | Same as the website's advanced settings |
 | `--no-accidentals` | Key-signature-only reading |
+| `--no-dewarp` | Skip the automatic page-curvature correction |
 | `--debug` | Also writes a `*_debug.png` overlay showing every detected staff line, notehead and barline — the fastest way to diagnose a bad result |
 
 The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is the fastest way to proof the detection against the printed page.
@@ -78,7 +80,7 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 - Solid (quarter/eighth), half and whole noteheads, on the staff and on ledger lines.
 - Printed **sharps, flats and naturals**, applied for the rest of their measure like a human reader would; barlines are detected to know where measures end.
 - Multi-page input to a single multi-page PDF.
-- Deskewing of tilted photos and adaptive thresholding for uneven phone-photo lighting.
+- Deskewing of tilted photos, straightening of bowed staff lines (page curvature in phone photos), and adaptive thresholding for uneven lighting.
 
 ## What it doesn't do
 
@@ -91,7 +93,7 @@ The terminal prints each staff's reading, e.g. `E3*:4  Eb3:1  F#3*:2`, which is 
 - **Rhythm is ignored** — it annotates pitches; it doesn't know a quarter note from an eighth.
 - Lyrics, chord symbols, dynamics and other text are usually ignored correctly, but dense markings can occasionally produce a stray detection.
 - Whole notes sitting directly on a staff line are occasionally missed.
-- Page curvature in photos bends staff lines and can shift pitches near the edges — flatten the page or use a scanning app for best results.
+- Page curvature in photos is straightened automatically before reading, but sharp creases, strong shadows or extreme perspective can still defeat detection — flatter and more evenly lit is always better. If the correction itself misbehaves on a page, turn it off (`--no-dewarp` / the advanced-settings checkbox).
 
 Always proof the first page of anything against the printed music, especially the orange flags. The `--debug` overlay (CLI) shows exactly what was detected.
 
