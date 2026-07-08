@@ -132,7 +132,7 @@
     <legend>Sheet music</legend>
     <div class="filebox">
       <input type="file" id="files" accept="image/*" multiple>
-      <p>One image per page (PNG or JPG), selected in page order. Scans work best; phone photos are deskewed automatically but should be as flat and evenly lit as possible.</p>
+      <p>One image per page (PNG or JPG), selected in page order. Scans work best; phone photos have tilt and page curvature corrected automatically, but keep the page as flat and evenly lit as you can.</p>
     </div>
   </fieldset>
 
@@ -175,6 +175,9 @@
     <div class="row" style="margin-top:12px">
       <label class="check"><input type="checkbox" id="noacc"> Ignore printed accidentals (key signature only)</label>
     </div>
+    <div class="row" style="margin-top:8px">
+      <label class="check"><input type="checkbox" id="nodewarp"> Skip page-curvature correction (photos)</label>
+    </div>
   </details>
 
   <button id="run" disabled>Loading&hellip;</button>
@@ -198,14 +201,14 @@ import io, os, json, contextlib, traceback
 from types import SimpleNamespace
 import alto_annotate as aa
 
-def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_left, no_accidentals):
+def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_left, no_accidentals, no_dewarp=False):
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
             args = SimpleNamespace(method=method, key=key, placement=placement,
                                    ledger_range=float(ledger_range), sensitivity=float(sensitivity),
                                    skip_left=float(skip_left), no_accidentals=bool(no_accidentals),
-                                   debug=False)
+                                   no_dewarp=bool(no_dewarp), debug=False)
             key_acc = None if key == "auto" else aa.key_accidentals(key)
             pages = [aa.annotate_page(p, args, key_acc) for p in paths]
             pages[0].save("/output.pdf", save_all=True, append_images=pages[1:], resolution=150)
@@ -277,6 +280,7 @@ async function annotate() {
       sensitivity: parseFloat($("sens").value) || 1.0,
       skip_left: parseFloat($("skip").value) || 8.0,
       no_accidentals: $("noacc").checked,
+      no_dewarp: $("nodewarp").checked,
     }));
     const result = JSON.parse(pyodide.runPython("run_annotate(**job)"));
 

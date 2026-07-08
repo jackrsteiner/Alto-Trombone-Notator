@@ -32,9 +32,11 @@ Notes & limitations (lightweight OpenCV approach):
     accidentals in parentheses, and ties carrying an accidental across a
     barline are NOT handled. Use --no-accidentals to fall back to
     key-signature-only reading.
-  * Works best on clean scans. Phone photos are deskewed and threshold-
-    adapted automatically, but page curvature will still bend staff lines
-    and shift detected pitches — flatten the page or use a scanning app.
+  * Works best on clean scans. Phone photos are deskewed, page curvature
+    is corrected (bowed staff lines are straightened before reading;
+    disable with --no-dewarp), and thresholding adapts to uneven lighting.
+    Sharp creases, strong shadows or extreme perspective can still defeat
+    detection — keep the page as flat and evenly lit as you can.
   * Chord symbols, lyrics and rests can occasionally be mistaken for notes
     (or faint noteheads missed). Run with --debug to see exactly what was
     detected, and adjust --ledger-range / --sensitivity if needed.
@@ -167,13 +169,164 @@ def binarize(gray):
                                  cv2.THRESH_BINARY_INV, block, 12)
 
 
+def dewarp_curvature(gray, color, debug=False):
+    """Straighten bowed staff lines (page curvature in phone photos).
+    Each staff line is traced as a curve, fitted with a quadratic, and the
+    page is remapped vertically so every line becomes straight. A global
+    rotation (deskew) cannot do this: on a curved page each staff carries
+    its own tilt. Runs up to three refinement passes: once the worst lines
+    are roughly straight, they trace as much longer fragments and the
+    residual fit improves. Returns (gray, color, total_deviation_px);
+    0.0 means the page was already flat (or tracing failed) and the
+    images are returned untouched."""
+    total = 0.0
+    for _ in range(3):
+        gray, color, dev = _dewarp_pass(gray, color, debug)
+        if not dev:
+            break
+        total += dev
+    return gray, color, total
+
+
+def _dewarp_pass(gray, color, debug=False):
+    h, w = gray.shape
+    trace = cv2.morphologyEx(binarize(gray), cv2.MORPH_OPEN,
+                             cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 40), 1)))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(trace, 8)
+
+    # Long thin near-horizontal strokes, as (columns, per-column mean y).
+    frags = []
+    for i in range(1, n):
+        x, y, ww, hh, area = stats[i]
+        if ww < 0.04 * w or hh > 0.03 * h or area / ww > max(4, h // 300):
+            continue
+        sub = lab[y:y + hh, x:x + ww] == i
+        ink = sub.sum(axis=0)
+        cols = np.nonzero(ink)[0]
+        ys = (sub * np.arange(hh)[:, None]).sum(axis=0)[cols] / ink[cols]
+        frags.append((x + cols.astype(np.float64), y + ys))
+    frags.sort(key=lambda f: f[0][0])
+
+    # Stitch fragments of the same line into chains by geometric continuity
+    # (never by absolute y: a curved line rises more than the staff spacing
+    # across the page, so y-proximity would cross-link neighbouring lines).
+    chains = []
+    for fx, fy in frags:
+        best, best_err = None, None
+        for ch in chains:
+            cx, cy = ch[-1]
+            gap = fx[0] - cx[-1]
+            if not (-0.02 * w <= gap <= 0.30 * w):
+                continue
+            tail = cx >= cx[-1] - max(20, 0.1 * w)
+            a, b = np.polyfit(cx[tail], cy[tail], 1)
+            err = abs(a * fx[0] + b - fy[0])
+            if err <= 6 + 0.03 * max(gap, 0) and (best is None or err < best_err):
+                best, best_err = ch, err
+        if best is not None:
+            best.append((fx, fy))
+        else:
+            chains.append([(fx, fy)])
+
+    curves = []
+    for ch in chains:
+        cx = np.concatenate([c[0] for c in ch])
+        cy = np.concatenate([c[1] for c in ch])
+        if len(cx) < 0.15 * w or cx[-1] - cx[0] < 0.20 * w:
+            continue
+        coef = np.polyfit(cx[::4], cy[::4], 2)
+        curves.append({"coef": coef, "x0": float(cx[0]), "x1": float(cx[-1]),
+                       "resid": float(np.sqrt(np.mean((np.polyval(coef, cx) - cy) ** 2))),
+                       "ref": float(np.polyval(coef, min(max(w / 2.0, cx[0]), cx[-1])))})
+
+    # Duplicate curves of one line (parallel stitching paths) collapse to
+    # near-identical refs; real staff lines are never 4 px apart.
+    curves.sort(key=lambda c: c["ref"])
+    merged = []
+    for c in curves:
+        if merged and c["ref"] - merged[-1]["ref"] < 4:
+            if c["x1"] - c["x0"] > merged[-1]["x1"] - merged[-1]["x0"]:
+                merged[-1] = c
+        else:
+            merged.append(c)
+    curves = merged
+
+    # A staff line always has a neighbour one staff space away; page-edge
+    # shadows and stray rules do not. Drop isolated curves.
+    if len(curves) >= 3:
+        refs = np.array([c["ref"] for c in curves])
+        d = np.diff(refs)
+        ss_est = float(np.median(d[d <= 1.5 * d.min()]))
+        curves = [c for j, c in enumerate(curves)
+                  if min(d[j - 1] if j else np.inf,
+                         d[j] if j < len(d) else np.inf) <= 3 * ss_est]
+
+    if len(curves) < 8:
+        return gray, color, 0.0
+    xs = np.arange(0, w, 8)
+    max_dev = max(np.abs(np.polyval(c["coef"], xs[(xs >= c["x0"]) & (xs <= c["x1"])])
+                         - c["ref"]).max(initial=0.0) for c in curves)
+    if max_dev < 2.0:
+        return gray, color, 0.0
+
+    # Evaluate each curve across the full width: quadratic inside its span,
+    # extended linearly with the end slope outside it (quadratics diverge).
+    xf = np.arange(w, dtype=np.float32)
+    C = np.empty((len(curves), w), np.float32)
+    for j, c in enumerate(curves):
+        a2, a1, a0 = c["coef"]
+        xe = np.clip(xf, c["x0"], c["x1"])
+        C[j] = (a2 * xe + a1) * xe + a0 + (xf - xe) * (2 * a2 * xe + a1)
+    refs = np.array([c["ref"] for c in curves], np.float32)
+    resid = [c["resid"] for c in curves]
+
+    # Crossing curves would fold the remap; drop the worse fit of any pair
+    # that comes closer than a pixel anywhere.
+    while len(C) >= 8:
+        bad = np.nonzero(np.diff(C, axis=0).min(axis=1) <= 1.0)[0]
+        if not len(bad):
+            break
+        j = bad[0] if resid[bad[0]] > resid[bad[0] + 1] else bad[0] + 1
+        C, refs = np.delete(C, j, axis=0), np.delete(refs, j)
+        del resid[j]
+    if len(C) < 8:
+        return gray, color, 0.0
+
+    # Remap so that source row C[j](x) lands on output row refs[j]. Virtual
+    # curves a page-height beyond the outermost real ones make plain linear
+    # interpolation degrade to a constant shift outside the staves. Built
+    # band by band: full-page float32 maps would cost hundreds of MB, which
+    # matters when this runs in the browser on a phone.
+    refs_p = np.concatenate(([refs[0] - h], refs, [refs[-1] + h])).astype(np.float32)
+    Cp = np.vstack((C[0] - h, C, C[-1] + h))
+    gray_out = np.empty_like(gray)
+    color_out = np.empty_like(color)
+    band = 512
+    map_x = np.tile(xf, (band, 1))
+    for y0 in range(0, h, band):
+        y1 = min(h, y0 + band)
+        ys = np.arange(y0, y1, dtype=np.float32)
+        idx = np.clip(np.searchsorted(refs_p, ys, side="right") - 1, 0, len(refs_p) - 2)
+        t = ((ys - refs_p[idx]) / (refs_p[idx + 1] - refs_p[idx])).astype(np.float32)
+        map_y = (1 - t)[:, None] * Cp[idx] + t[:, None] * Cp[idx + 1]
+        mx = map_x[:y1 - y0]
+        gray_out[y0:y1] = cv2.remap(gray, mx, map_y, cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+        color_out[y0:y1] = cv2.remap(color, mx, map_y, cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT,
+                                     borderValue=(255, 255, 255))
+    if debug:
+        print(f"  dewarp: {len(C)} staff-line curves, max deviation {max_dev:.0f}px")
+    return gray_out, color_out, float(max_dev)
+
+
 def find_staves(bw):
     """Return list of staves: dict(lines, top, bottom, space, xstart)."""
     w = bw.shape[1]
     horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
                              cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 10), 1)))
     rowsum = horiz.sum(axis=1) / 255.0
-    is_line = rowsum > 0.25 * w
+    is_line = rowsum > 0.15 * w
 
     centres = []
     y = 0
@@ -182,23 +335,78 @@ def find_staves(bw):
             y0 = y
             while y < len(is_line) and is_line[y]:
                 y += 1
-            centres.append((y0 + y - 1) / 2.0)
+            # a line split across two runs by resampling (deskew/dewarp
+            # antialiasing) is one line; real lines are never this close
+            if centres and y0 - centres[-1] < 6:
+                centres[-1] = (centres[-1] + (y0 + y - 1) / 2.0) / 2.0
+            else:
+                centres.append((y0 + y - 1) / 2.0)
         else:
             y += 1
 
-    staves = []
-    i = 0
-    while i + 4 < len(centres):
-        five = centres[i:i + 5]
-        gaps = np.diff(five)
-        if gaps.min() > 3 and gaps.max() < 1.35 * gaps.min():
-            xs = np.where(horiz[int(five[2])] > 0)[0]
-            staves.append({"lines": five, "top": five[0], "bottom": five[4],
-                           "space": float(np.mean(gaps)),
-                           "xstart": int(xs.min()) if len(xs) else 0})
-            i += 5
-        else:
-            i += 1
+    def cov(row):
+        """Fraction of columns with raw ink within 2px of this row."""
+        r = int(round(row))
+        band = bw[max(0, r - 2):r + 3]
+        return float((band.max(axis=0) > 0).mean()) if band.size else 0.0
+
+    # Candidate staves, scored by how line-like their five rows are. Besides
+    # five clean detected lines, accept four plus one reconstructed from raw
+    # ink at the expected position: a blurry photo can degrade one line of a
+    # staff below the detection threshold while the music stays readable.
+    h = bw.shape[0]
+    cands = []
+    for i in range(len(centres)):
+        if i + 4 < len(centres):
+            five = centres[i:i + 5]
+            gaps = np.diff(five)
+            if gaps.min() > 3 and gaps.max() < 1.35 * gaps.min():
+                cands.append((sum(cov(c) for c in five), five))
+        if i + 3 < len(centres):
+            four = np.array(centres[i:i + 4])
+            g = np.diff(four)
+            if g.min() <= 3:
+                continue
+            virtuals = []
+            if g.max() < 1.35 * g.min():                    # missing outer line
+                virtuals = [four[0] - g.mean(), four[3] + g.mean()]
+            else:                                           # missing inner line
+                for k in range(3):
+                    rest = np.delete(g, k)
+                    if (rest.max() < 1.35 * rest.min()
+                            and abs(g[k] - 2 * rest.mean()) < 0.35 * rest.mean()):
+                        virtuals = [four[k] + g[k] / 2.0]
+                        break
+            for v in virtuals:
+                if 0 <= v <= h - 1 and cov(v) >= 0.08:
+                    five = sorted(list(four) + [float(v)])
+                    # small penalty: five real lines beat a reconstruction
+                    cands.append((sum(cov(c) for c in five) - 0.25, five))
+
+    cands.sort(key=lambda c: -c[0])
+    staves, used = [], np.zeros(h, bool)
+    for _, five in cands:
+        y0, y1 = int(five[0]), int(five[4])
+        if used[max(0, y0 - 4):y1 + 5].any():
+            continue
+        used[y0:y1 + 1] = True
+        ss = float(np.mean(np.diff(five)))
+        # left end of the staff, from raw ink (the opening eats the faint
+        # left reach of photographed lines): first x where a 2-space window
+        # around each line is mostly inked; median over the five lines
+        starts = []
+        win = max(3, int(2 * ss))
+        for ly in five:
+            r = int(round(ly))
+            band = bw[max(0, r - 2):r + 3].max(axis=0) > 0
+            frac = np.convolve(band, np.ones(win), "same") / win
+            good = np.where(frac >= 0.6)[0]
+            if len(good):
+                starts.append(max(0, int(good.min() - win // 2)))
+        staves.append({"lines": list(five), "top": five[0], "bottom": five[4],
+                       "space": ss,
+                       "xstart": int(np.median(starts)) if starts else 0})
+    staves.sort(key=lambda s: s["top"])
     return staves, horiz
 
 
@@ -676,15 +884,18 @@ def detect_key_signature(staves, rois):
     """Majority-vote the page's key across its staves.
     rois is the [(healed, light, y0)] list parallel to staves.
     Returns (key_name, votes_for_winner, staff_count)."""
-    votes = []
-    for staff, (_, light, y0) in zip(staves, rois):
-        kind, n = detect_staff_key(light, y0, staff)
-        votes.append((SHARP_KEYS if kind == "sharp" else FLAT_KEYS)[n])
-    tally = Counter(votes)
-    # A staff whose glyphs were unreadable votes C, so ties favour a real
-    # signature over an empty reading.
-    key, n = max(tally.items(), key=lambda kv: (kv[1], kv[0] != "C"))
-    return key, n, len(votes)
+    readings = [detect_staff_key(light, y0, staff)
+                for staff, (_, light, y0) in zip(staves, rois)]
+    nonzero = [(t, n) for t, n in readings if n]
+    if not nonzero:
+        return "C", len(readings), len(readings)
+    types = Counter(t for t, _ in nonzero)
+    kind = max(types, key=types.get)
+    # A blurry staff under-reads its signature (a glyph drops out and the
+    # run stops early) but never over-reads it, so take the deepest count.
+    count = max(n for t, n in nonzero if t == kind)
+    agree = sum(1 for t, n in nonzero if t == kind and n == count)
+    return (SHARP_KEYS if kind == "sharp" else FLAT_KEYS)[count], agree, len(readings)
 
 
 # --------------------------------------------------------------------------
@@ -706,6 +917,10 @@ def annotate_page(path, args, key_acc):
         sys.exit(f"Could not read image: {path}")
     gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
     gray, color, angle = deskew(gray, color)
+    if getattr(args, "no_dewarp", False):    # getattr: tolerate an older caller
+        warp_dev = 0.0
+    else:
+        gray, color, warp_dev = dewarp_curvature(gray, color, debug=args.debug)
     bw = binarize(gray)
     staves, horiz = find_staves(bw)
     if not staves:
@@ -806,6 +1021,8 @@ def annotate_page(path, args, key_acc):
         print(f"  debug overlay -> {dpath}")
     if angle:
         print(f"  (deskewed {angle:+.2f} degrees)")
+    if warp_dev:
+        print(f"  (dewarped {warp_dev:.0f}px of staff-line curvature)")
     if unknown:
         print(f"  {unknown}/{total} notes could not be resolved (marked '?').")
     return out
@@ -835,6 +1052,8 @@ def main():
                          "signature zone, default 8.0; lower it if pickup notes are missed)")
     ap.add_argument("--no-accidentals", action="store_true",
                     help="ignore printed accidentals; use the key signature only")
+    ap.add_argument("--no-dewarp", action="store_true",
+                    help="skip automatic page-curvature correction for photos")
     ap.add_argument("--debug", action="store_true",
                     help="save a *_debug.png overlay showing detected staves, noteheads "
                          "and barlines")
