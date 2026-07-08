@@ -208,10 +208,12 @@ from types import SimpleNamespace
 import alto_annotate as aa
 
 # In the worker, completed lines are streamed to the page while the run is
-# still going. Outside the browser (test harnesses) there is no js.pyLog.
+# still going, and the engine reports each processing step through the
+# PROGRESS hook. Outside the browser (test harnesses) neither exists.
 try:
     import js
     _emit = getattr(js, "pyLog", None)
+    aa.PROGRESS = getattr(js, "pyProgress", None)
 except ImportError:
     _emit = None
 
@@ -251,6 +253,7 @@ def run_annotate(paths, method, key, placement, ledger_range, sensitivity, skip_
 `;
 
 self.pyLog = t => postMessage({ type: "log", text: t });
+self.pyProgress = t => postMessage({ type: "progress", text: t });
 
 async function init() {
   try {
@@ -368,6 +371,10 @@ worker.onmessage = e => {
     status("Ready. Choose your image(s) and press Annotate.");
   } else if (m.type === "error") status("Could not start: " + m.error, true);
   else if (m.type === "log") appendLog(m.text);
+  else if (m.type === "progress") {
+    appendLog("· " + m.text);               // activity line, kept as history
+    status("Annotating — " + m.text);       // and shown as the current step
+  }
   else if (m.type === "done") finish(m);
 };
 worker.onerror = e => {

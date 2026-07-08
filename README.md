@@ -29,7 +29,7 @@ Any other static host (Netlify, Cloudflare Pages, a plain web server) works the 
 1. Wait for the runtime to load. The **first visit downloads roughly 60–90 MB** (Python, numpy, OpenCV, Pillow); later visits use the browser cache and start much faster.
 2. Choose one image per page of music, in page order. PNG or JPG.
 3. Pick a method and where the numbers should go. The **key signature is read from the image automatically**; leave the key on *Auto-detect* unless the log's `detected key` line disagrees with the printed signature, in which case pick the major key yourself and run again.
-4. Press **Annotate**. A few seconds per page is normal (longer on phones). The **Progress log** panel below the button streams each staff's reading as it happens — that's how you know it's working, not frozen. The panel is collapsible (click its header) and scrolls when the output gets long.
+4. Press **Annotate**. A few seconds per page is normal (longer on phones). The **Progress log** panel below the button streams every processing step as it happens — `·`-prefixed activity lines (loading, deskewing, flattening curvature, isolating each staff, reading each staff's notes, with their results) interleaved with the engine's readings, so you can see what is being done and what has already finished. The status line under the button always shows the current step. The panel is collapsible (click its header) and scrolls when the output gets long.
 5. Review the log (including the `detected key` line), then download the PDF.
 
 The site works on mobile browsers (Safari, Chrome). The first-visit download is the main cost — do it on Wi-Fi. On a phone you can photograph the music directly from the file picker.
