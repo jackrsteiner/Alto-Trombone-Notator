@@ -129,6 +129,15 @@
   .dlgroup[data-m="octave"] h3 { color: var(--octave); }
   .dlgroup[data-m="pitch"]  h3 { color: var(--pitch); }
   .dlgroup[data-m="fourth"] h3 { color: var(--fourth); }
+  #download button.playbtn {
+    font: inherit; font-size: 0.9rem; font-weight: 600;
+    background: #fff; color: var(--brass-dark);
+    border: 1.5px solid var(--rule); border-radius: 6px;
+    padding: 10px 14px; margin: 0 6px 8px 0; cursor: pointer;
+    vertical-align: bottom;
+  }
+  #download button.playbtn:hover { border-color: var(--brass); }
+  #download .midpair { white-space: nowrap; }
   #download .dlgroup[data-m="pitch"]  a:not(.mid) { background: var(--pitch); }
   #download .dlgroup[data-m="fourth"] a:not(.mid) { background: var(--fourth); }
   .note { font-size: 0.85rem; color: var(--faint); margin-top: 30px; border-top: 1px solid var(--rule); padding-top: 14px; }
@@ -204,7 +213,7 @@
   </details>
   <div id="download"><!-- one .dlgroup per selected method, built by finish() --></div>
 
-  <p class="note">Everything runs in your browser &mdash; images never leave this device &mdash; and the progress log above streams while pages are processed. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number is a best guess &mdash; verify it by eye. A detected note with <b>no number printed</b> has no slide position in the chosen method (it appears as <b>?</b> in the log); the space is left blank so you can pencil it in. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
+  <p class="note">The <b>&#9654;</b> buttons play each MIDI rendering right here in the page. The downloaded <code>.mid</code> files need a synthesizer app such as GarageBand, MuseScore or a DAW &mdash; QuickTime and VLC on macOS cannot play MIDI files, even though the files are fine. Everything runs in your browser &mdash; images never leave this device &mdash; and the progress log above streams while pages are processed. In the results, a green/blue/red number is a confident reading, <b>*</b> marks a note read via a detected accidental, and an <b class="q">orange</b> number is a best guess &mdash; verify it by eye. A detected note with <b>no number printed</b> has no slide position in the chosen method (it appears as <b>?</b> in the log); the space is left blank so you can pencil it in. When the key is auto-detected, the log shows a <i>detected key</i> line per page &mdash; if it disagrees with the printed signature, pick the key manually and run again.</p>
 </main>
 
 <!-- The annotation engine runs in a Web Worker so the page never freezes and
@@ -375,11 +384,123 @@ function makeLink(buf, type, name, text, cls) {
   return a;
 }
 
+// ---- in-page MIDI playback (macOS has no stock .mid player, so offer one) --
+
+function parseSMF(buf) {
+  // format-0 single-track reader: note on/off pairs, tempo, ticks/quarter
+  const b = new Uint8Array(buf);
+  const u32 = i => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
+  const tag = i => String.fromCharCode(b[i], b[i + 1], b[i + 2], b[i + 3]);
+  if (tag(0) !== "MThd") throw new Error("not a MIDI file");
+  const tpq = (b[12] << 8) | b[13];
+  let i = 8 + u32(4);
+  if (tag(i) !== "MTrk") throw new Error("no MIDI track");
+  const end = i + 8 + u32(i + 4);
+  i += 8;
+  const vlq = () => {
+    let v = 0;
+    while (b[i] & 0x80) v = (v << 7) | (b[i++] & 0x7f);
+    return (v << 7) | b[i++];
+  };
+  let t = 0, usq = 500000, status = 0;
+  const open = {}, notes = [];
+  while (i < end) {
+    t += vlq();
+    let s = b[i];
+    if (s & 0x80) i++; else s = status;      // running status
+    if (s < 0xf0) status = s;
+    if (s === 0xff) {                        // meta: type, length, payload
+      const type = b[i++], len = vlq();
+      if (type === 0x51) usq = (b[i] << 16) | (b[i + 1] << 8) | b[i + 2];
+      i += len;
+    } else if (s === 0xf0 || s === 0xf7) {   // sysex: length, payload
+      i += vlq();
+    } else {
+      const hi = s & 0xf0, one = hi === 0xc0 || hi === 0xd0;
+      const p = b[i], v = one ? 0 : b[i + 1];
+      i += one ? 1 : 2;
+      if (hi === 0x90 && v > 0) open[p] = { p, t, d: tpq };
+      else if ((hi === 0x80 || hi === 0x90) && open[p]) {
+        open[p].d = t - open[p].t;
+        notes.push(open[p]);
+        delete open[p];
+      }
+    }
+  }
+  return { tpq, usq, notes };
+}
+
+let audioCtx = null;
+let playing = null;   // { btn, oscs, master, timer }
+
+function stopPlayback() {
+  if (!playing) return;
+  clearTimeout(playing.timer);
+  for (const o of playing.oscs) { try { o.stop(); } catch (e) {} }
+  try { playing.master.disconnect(); } catch (e) {}
+  playing.btn.textContent = "▶";
+  playing = null;
+}
+
+function startPlayback(buf, btn) {
+  stopPlayback();
+  const { tpq, usq, notes } = parseSMF(buf);
+  if (!notes.length) return;
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  audioCtx.resume();
+  const master = audioCtx.createGain();
+  master.gain.value = 0.22;
+  const filt = audioCtx.createBiquadFilter();
+  filt.type = "lowpass";
+  filt.frequency.value = 1500;
+  filt.connect(master);
+  master.connect(audioCtx.destination);
+  const spt = usq / 1e6 / tpq;               // seconds per tick
+  const t0 = audioCtx.currentTime + 0.1;
+  const oscs = [];
+  let endT = t0;
+  for (const n of notes) {
+    const start = t0 + n.t * spt, dur = Math.max(0.08, n.d * spt);
+    const osc = audioCtx.createOscillator();
+    osc.type = "sawtooth";
+    osc.frequency.value = 440 * Math.pow(2, (n.p - 69) / 12);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0, start);
+    g.gain.linearRampToValueAtTime(1, start + 0.015);
+    g.gain.setValueAtTime(1, Math.max(start + 0.015, start + dur - 0.06));
+    g.gain.linearRampToValueAtTime(0, start + dur);
+    osc.connect(g);
+    g.connect(filt);
+    osc.start(start);
+    osc.stop(start + dur + 0.02);
+    oscs.push(osc);
+    endT = Math.max(endT, start + dur);
+  }
+  btn.textContent = "■";
+  playing = { btn, oscs, master,
+              timer: setTimeout(stopPlayback, (endT - audioCtx.currentTime + 0.3) * 1000) };
+}
+
+function makePlay(buf, label) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "playbtn";
+  btn.textContent = "▶";
+  btn.title = `Play (${label}) in the browser`;
+  btn.setAttribute("aria-label", btn.title);
+  btn.addEventListener("click", () => {
+    if (playing && playing.btn === btn) stopPlayback();
+    else startPlayback(buf, btn);
+  });
+  return btn;
+}
+
 function finish(m) {
   running = false;
   if (m.ok) {
     setLog(m.log.trim());
     const box = $("download");
+    stopPlayback();
     blobURLs.forEach(u => URL.revokeObjectURL(u));
     blobURLs = [];
     box.textContent = "";
@@ -392,10 +513,15 @@ function finish(m) {
       grp.appendChild(h);
       grp.appendChild(makeLink(r.pdf, "application/pdf",
         `${jobName}_alto_${r.method}.pdf`, "Annotated PDF"));
-      grp.appendChild(makeLink(r.midiEqual, "audio/midi",
-        `${jobName}_alto_${r.method}_equal.mid`, "MIDI — even notes", "mid"));
-      grp.appendChild(makeLink(r.midiRhythm, "audio/midi",
-        `${jobName}_alto_${r.method}_rhythm.mid`, "MIDI — guessed rhythm", "mid"));
+      for (const [buf, kind, text] of [[r.midiEqual, "equal", "MIDI — even notes"],
+                                       [r.midiRhythm, "rhythm", "MIDI — guessed rhythm"]]) {
+        const pair = document.createElement("span");
+        pair.className = "midpair";
+        pair.appendChild(makePlay(buf, `${METHOD_LABELS[r.method]}, ${text.slice(7)}`));
+        pair.appendChild(makeLink(buf, "audio/midi",
+          `${jobName}_alto_${r.method}_${kind}.mid`, text, "mid"));
+        grp.appendChild(pair);
+      }
       box.appendChild(grp);
     }
     box.style.display = "block";
@@ -435,6 +561,7 @@ async function annotate() {
 
   running = true;
   $("run").disabled = true;
+  stopPlayback();
   $("download").style.display = "none";
   $("log").textContent = "";
   $("logbox").style.display = "block";
